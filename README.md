@@ -1,5 +1,5 @@
 # ATLAS : Dependency Mapper
-**Srijan Dahal , Parth Poudyal** <br>
+**Srijan Dahal , Parth Poudyal , Arun Mainali , Suprit Phuyal** <br>
 *Frogtober Fest 2026*  
 
 
