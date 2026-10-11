@@ -1,0 +1,30 @@
+{
+  "model": "gemma4:e4b",
+  "stream": false,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Rate how load-bearing the fmt package is for a small CLI app."
+    }
+  ],
+  "format": {
+    "type": "object",
+    "properties": {
+      "coupling": {
+        "type": "string",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "reason": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "coupling",
+      "reason"
+    ]
+  }
+}
