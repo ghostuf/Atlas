@@ -239,6 +239,8 @@ func fetchFile(repo, ref, dir, name string) ([]byte, error) {
 // ---------- main ----------
 
 func main() {
+	loadDotEnv(".env")
+
 	repo := flag.String("repo", "", "GitHub repo as owner/name")
 	ref := flag.String("ref", "", "branch, tag or sha (default: default branch)")
 	dir := flag.String("dir", "", "subdirectory containing package-lock.json (monorepos)")
@@ -248,7 +250,16 @@ func main() {
 	show := flag.String("show", "", "print sampled usage snippets for this package")
 	viz := flag.String("viz", "", "write an interactive HTML graph to this file, e.g. graph.html")
 	vizMax := flag.Int("viz-max", 150, "max nodes in the visualization (root + direct deps always included)")
+	health := flag.Bool("health", true, "fetch dependency health signals (npm registry, GitHub, OSV.dev); -health=false to skip")
+	healthTop := flag.Int("health-top", 0, "also check this many additional packages by blast-radius rank")
+	healthJSON := flag.String("health-json", "", "write the health report as JSON to this path")
+	model := flag.String("model", "gemma4:e4b", "Ollama model to use for the interactive agent (used when no -repo/-file is given)")
 	flag.Parse()
+
+	if *repo == "" && *file == "" {
+		runAgentMode(*model)
+		return
+	}
 
 	var data []byte
 	var err error
@@ -257,9 +268,6 @@ func main() {
 		data, err = os.ReadFile(*file)
 	case *repo != "":
 		data, err = fetchFile(*repo, *ref, *dir, "package-lock.json")
-	default:
-		fmt.Fprintln(os.Stderr, "provide -repo owner/name or -file path")
-		os.Exit(2)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -286,47 +294,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	edges := 0
-	direct := 0
-	var list []*Node
-	for id, n := range g.Nodes {
-		edges += len(n.Out)
-		if id == "" || n.Depth < 0 {
-			continue
-		}
-		if n.Direct {
-			direct++
-		}
-		list = append(list, n)
-	}
-	fmt.Printf("Graph: %d vertices, %d edges, %d direct deps\n\n", len(g.Nodes), edges, direct)
-
-	// Rank by blast-radius upper bound, then direct fan-in.
-	sort.Slice(list, func(i, j int) bool {
-		a, b := list[i], list[j]
-		if a.TransitiveDependents != b.TransitiveDependents {
-			return a.TransitiveDependents > b.TransitiveDependents
-		}
-		if len(a.In) != len(b.In) {
-			return len(a.In) > len(b.In)
-		}
-		return a.Name < b.Name
-	})
-
-	fmt.Printf("%-40s %-10s %-7s %-6s %-9s %s\n", "PACKAGE", "VERSION", "DIRECT", "DEPTH", "DEPENDENTS", "TRANSITIVE")
-	for i, n := range list {
-		if i >= *top {
-			break
-		}
-		fmt.Printf("%-40s %-10s %-7v %-6d %-9d  %d\n",
-			trunc(n.Name, 40), trunc(n.Version, 10), n.Direct, n.Depth, len(n.In), n.TransitiveDependents)
-	}
+	fmt.Print(graphReport(g, *top))
 
 	if *viz != "" {
 		if err := writeViz(g, *viz, *vizMax); err != nil {
 			fmt.Fprintln(os.Stderr, "viz error:", err)
 		} else {
 			fmt.Printf("\nWrote interactive graph to %s (open it in a browser)\n", *viz)
+		}
+	}
+
+	// ---- step 3: health signals ----
+	if *health {
+		rows := runHealth(g, *healthTop)
+		printHealth(rows)
+		if *healthJSON != "" {
+			if err := writeHealthJSON(rows, *healthJSON); err != nil {
+				fmt.Fprintln(os.Stderr, "health json error:", err)
+			} else {
+				fmt.Printf("\nWrote health report to %s\n", *healthJSON)
+			}
 		}
 	}
 
@@ -344,8 +331,54 @@ func main() {
 		srcDir = filepath.Dir(*file)
 	}
 	if srcDir != "" {
-		runScan(g, srcDir, *show)
+		runScan(g, srcDir, *show, true)
 	}
+}
+
+// rankNodes returns every reachable, non-root node ranked by blast-radius
+// upper bound (then direct fan-in), plus the raw edge/direct-dep counts.
+// Shared by the one-shot CLI table, the agent's chat-facing summary, and the
+// HTML report's graph table.
+func rankNodes(g *Graph) (list []*Node, edges, direct int) {
+	for id, n := range g.Nodes {
+		edges += len(n.Out)
+		if id == "" || n.Depth < 0 {
+			continue
+		}
+		if n.Direct {
+			direct++
+		}
+		list = append(list, n)
+	}
+
+	sort.Slice(list, func(i, j int) bool {
+		a, b := list[i], list[j]
+		if a.TransitiveDependents != b.TransitiveDependents {
+			return a.TransitiveDependents > b.TransitiveDependents
+		}
+		if len(a.In) != len(b.In) {
+			return len(a.In) > len(b.In)
+		}
+		return a.Name < b.Name
+	})
+	return list, edges, direct
+}
+
+// graphReport renders the summary + ranked table as text.
+func graphReport(g *Graph, top int) string {
+	list, edges, direct := rankNodes(g)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Graph: %d vertices, %d edges, %d direct deps\n\n", len(g.Nodes), edges, direct)
+	fmt.Fprintf(&b, "%-40s %-10s %-7s %-6s %-9s %s\n", "PACKAGE", "VERSION", "DIRECT", "DEPTH", "DEPENDENTS", "TRANSITIVE")
+	for i, n := range list {
+		if i >= top {
+			break
+		}
+		fmt.Fprintf(&b, "%-40s %-10s %-7v %-6d %-9d  %d\n",
+			trunc(n.Name, 40), trunc(n.Version, 10), n.Direct, n.Depth, len(n.In), n.TransitiveDependents)
+	}
+	return b.String()
 }
 
 func trunc(s string, n int) string {

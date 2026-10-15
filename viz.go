@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -84,6 +85,11 @@ func writeViz(g *Graph, path string, maxNodes int) error {
 		return err
 	}
 	html := strings.Replace(vizTemplate, "__DATA__", string(b), 1)
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
 	return os.WriteFile(path, []byte(html), 0o644)
 }
 
@@ -141,7 +147,7 @@ function resize(){
   dpr = window.devicePixelRatio || 1; W = window.innerWidth; H = window.innerHeight;
   cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr);
 }
-window.addEventListener('resize', resize); resize();
+window.addEventListener('resize', resize);
 
 var col = {};
 function loadColors(){
@@ -351,11 +357,28 @@ document.getElementById('q').addEventListener('input', function(){
   if (best >= 0){ select(best); view.x = W/2 - nodes[best].x*view.k; view.y = H/2 - nodes[best].y*view.k; }
 });
 
-// settle the layout before the first frame, then fit to screen
-for (var s = 0; s < 450; s++) tick();
-fit(); updateInfo();
-function loop(){ tick(); draw(); window.requestAnimationFrame(loop); }
-loop();
+// A freshly-opened browser window (as opposed to a new tab in one already
+// running) often hasn't finished being sized by the window manager at the
+// moment this script runs — window.innerWidth/innerHeight can read a
+// transient wrong value, which bakes a bad pan/zoom into fit() and makes the
+// graph appear blank or off-screen until a manual reload. Defer the first
+// measurement past 'load', plus a short buffer, and re-measure once more
+// shortly after as a defensive fallback for window managers that still
+// haven't settled by then.
+function boot(){
+  resize();
+  // settle the layout before the first frame, then fit to screen
+  for (var s = 0; s < 450; s++) tick();
+  fit(); updateInfo();
+  function loop(){ tick(); draw(); window.requestAnimationFrame(loop); }
+  loop();
+}
+if (document.readyState === 'complete') {
+  setTimeout(boot, 50);
+} else {
+  window.addEventListener('load', function(){ setTimeout(boot, 50); });
+}
+setTimeout(function(){ resize(); fit(); }, 350);
 })();
 </script>
 </body>
