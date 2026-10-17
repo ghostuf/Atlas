@@ -7,9 +7,13 @@
 //	go run . -repo owner/repo -ref main -dir packages/app
 //	go run . -file ./package-lock.json          # local file
 //	go run . -repo owner/repo -top 30
+//
+// Private repos work too: set GITHUB_TOKEN (in .env or the environment) with
+// read access to the repo.
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -218,7 +222,11 @@ func fetchFile(repo, ref, dir, name string) ([]byte, error) {
 	if dir != "" {
 		path = strings.Trim(dir, "/") + "/" + path
 	}
-	url := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s", repo, ref, path)
+	owner, rname, ok := strings.Cut(repo, "/")
+	if !ok || owner == "" || rname == "" {
+		return nil, fmt.Errorf("invalid repo spec %q (want owner/name)", repo)
+	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s", owner, rname, path, ref)
 
 	req, _ := http.NewRequest("GET", url, nil)
 	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
@@ -231,9 +239,33 @@ func fetchFile(repo, ref, dir, name string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GET %s: %s (does the repo have a committed package-lock.json at that path?)", url, resp.Status)
+		return nil, fmt.Errorf("GET %s: %s (does the repo have a committed %q at that path?)", url, resp.Status, name)
 	}
-	return io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var ghFile struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+		Message  string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &ghFile); err != nil {
+		return nil, fmt.Errorf("parse github contents response: %w", err)
+	}
+	if ghFile.Content == "" {
+		return nil, fmt.Errorf("GET %s: %s (no content returned)", url, resp.Status)
+	}
+	switch ghFile.Encoding {
+	case "base64":
+		data, err := base64.StdEncoding.DecodeString(ghFile.Content)
+		if err != nil {
+			return nil, fmt.Errorf("decode base64 content: %w", err)
+		}
+		return data, nil
+	default:
+		return nil, fmt.Errorf("unsupported github content encoding %q", ghFile.Encoding)
+	}
 }
 
 // ---------- main ----------

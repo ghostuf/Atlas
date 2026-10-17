@@ -281,14 +281,15 @@ func lastPageFromLink(link string) int {
 }
 
 // fetchGithubContributorStats can 202 while GitHub computes stats in the
-// background; we retry once and otherwise give up rather than block the run.
-// Note: this endpoint is used only for the weekly commit breakdown bus
-// factor needs — it is NOT a reliable total contributor count (see
-// paginatedCount above), since it caps out well short of the real number on
-// busy repos.
+// background; we retry with a growing backoff and otherwise give up rather
+// than block the run. Note: this endpoint is used only for the weekly commit
+// breakdown bus factor needs — it is NOT a reliable total contributor count
+// (see paginatedCount above), since it caps out well short of the real number
+// on busy repos.
 func fetchGithubContributorStats(owner, repo string) ([]ghContributorStats, error) {
 	u := fmt.Sprintf("https://api.github.com/repos/%s/%s/stats/contributors", owner, repo)
-	for attempt := 0; attempt < 2; attempt++ {
+	const maxAttempts = 4
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		body, status, err := httpGet(u, githubHeaders())
 		if err != nil {
 			return nil, err
@@ -301,7 +302,7 @@ func fetchGithubContributorStats(owner, repo string) ([]ghContributorStats, erro
 			}
 			return stats, nil
 		case 202:
-			time.Sleep(2 * time.Second)
+			time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
 			continue
 		case 403, 429:
 			return nil, githubRateLimitErr(status)
@@ -541,7 +542,8 @@ type Health struct {
 	BusFactor        float64 // top contributor's share of commits, trailing 12mo, [0,1]
 
 	Advisories []Advisory
-	Notes      []string // partial-failure notes, e.g. "no GitHub repo found"
+	Notes      []string // best-effort notes; not all of them make the package unevaluable — see Material
+	Material   bool     // true only if a failure prevented evaluating the package's core risk (npm/GitHub lookup), not a secondary signal
 }
 
 // healthTargets picks direct dependencies (one Node per distinct package
@@ -594,6 +596,7 @@ func fetchHealth(n *Node, advisories []Advisory) *Health {
 	pj, err := fetchNpmPackument(n.Name)
 	if err != nil {
 		h.Notes = append(h.Notes, err.Error()) // fetchNpmPackument's error already says "npm registry: ..."
+		h.Material = true                      // no package metadata at all: can't evaluate this one
 		return h
 	}
 	h.LastPublish, h.PublishCadenceDays, h.MaintainerCount = npmPublishStats(pj)
@@ -613,6 +616,7 @@ func fetchHealth(n *Node, advisories []Advisory) *Health {
 
 	if r, err := fetchGithubRepo(owner, repo); err != nil {
 		h.Notes = append(h.Notes, "github repo: "+err.Error())
+		h.Material = true // GitHub API unreachable/rate-limited: archived + abandonment signals are unavailable
 	} else {
 		h.Archived = r.Archived
 		if t, err := time.Parse(time.RFC3339, r.PushedAt); err == nil {
@@ -735,12 +739,16 @@ func advisoryStr(h *Health) string {
 }
 
 // splitHealthProblems separates packages Atlas could actually evaluate from
-// ones where something failed along the way (npm registry 404, GitHub rate
-// limited, etc.) — the latter have no reliable signal behind them and
-// shouldn't be mixed into health findings or judged as if they were.
+// ones it fundamentally couldn't. Only a Material failure (npm registry
+// lookup or GitHub repo fetch) puts a package here — those leave no reliable
+// core signal to score on. Secondary signals (weekly downloads, contributor
+// count, bus factor, open-PR count, or simply having no GitHub repo) can fail
+// transiently or be irrelevant without making the package unevaluable:
+// its advisories, archived flag, and usage class are still valid, so it stays
+// in `clean` and keeps contributing to the score.
 func splitHealthProblems(rows []*Health) (clean, problems []*Health) {
 	for _, h := range rows {
-		if len(h.Notes) > 0 {
+		if h.Material {
 			problems = append(problems, h)
 		} else {
 			clean = append(clean, h)

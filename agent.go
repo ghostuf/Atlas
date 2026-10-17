@@ -10,10 +10,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
+
+// askForInputRe matches a final answer that asks for a repo or lockfile, or
+// claims the tool output is missing, after the tools have already run.
+var askForInputRe = regexp.MustCompile(`(?i)(please provide|provide either|once you provide|i need access to the project|in the format owner/name|not (been )?received|have not (been )?(received|provided)|tool output|cannot (provide|write|generate)|i require the output|provide the results)`)
 
 // reportDir is where the agent writes graph.html and report.html, always,
 // so a session's output lives in one predictable place instead of the repo
@@ -289,16 +294,64 @@ func (s *session) scanUsage(pkg string) string {
 	return text
 }
 
-// healthWithUsage merges a Health record with its usage-scan cross-reference
-// into one JSON object, so the model sees "this package has a HIGH severity
-// advisory AND is only used in a test file" as a single fact instead of
-// having to join two separate tool outputs itself — a small local model
-// reliably uses an inline field but can't be trusted to cross-reference two
-// tables on its own.
-type healthWithUsage struct {
-	*Health
-	UsedInProject  string `json:"usedInProject"`
-	Classification string `json:"classification"` // computed deterministically — see classifyUsage; don't second-guess it
+// compactHealth is the model-facing view of a Health record. The full record
+// (every advisory, every field) still goes into the HTML report; the model
+// only gets what it needs to reason, because a large tool result can push
+// earlier context out of the local model's window.
+type compactHealth struct {
+	Package          string   `json:"package"`
+	Version          string   `json:"version"`
+	Dev              bool     `json:"dev,omitempty"`
+	Classification   string   `json:"classification"`
+	UsedInProject    string   `json:"usedInProject"`
+	Archived         bool     `json:"archived,omitempty"`
+	WeeklyDownloads  int      `json:"weeklyDownloads,omitempty"`
+	ContributorCount int      `json:"contributorCount,omitempty"`
+	BusFactorPct     int      `json:"busFactorPct,omitempty"`
+	LastCommit       string   `json:"lastCommit,omitempty"`
+	LastPublish      string   `json:"lastPublish,omitempty"`
+	OpenIssues       int      `json:"openIssues,omitempty"`
+	AdvisoryCount    int      `json:"advisoryCount,omitempty"`
+	TopAdvisories    []string `json:"topAdvisories,omitempty"` // most severe first, capped
+}
+
+const maxTopAdvisories = 5
+
+func compactHealthFor(h *Health, usedIn, class string) compactHealth {
+	c := compactHealth{
+		Package: h.Package, Version: h.Version, Dev: h.Dev,
+		Classification: class, UsedInProject: usedIn, Archived: h.Archived,
+		WeeklyDownloads: h.WeeklyDownloads, ContributorCount: h.ContributorCount,
+		BusFactorPct: int(h.BusFactor*100 + 0.5), OpenIssues: h.OpenIssues,
+		AdvisoryCount: len(h.Advisories),
+	}
+	if !h.LastCommit.IsZero() {
+		c.LastCommit = dateOrDash(h.LastCommit)
+	}
+	if !h.LastPublish.IsZero() {
+		c.LastPublish = dateOrDash(h.LastPublish)
+	}
+	advs := append([]Advisory(nil), h.Advisories...)
+	sort.SliceStable(advs, func(i, j int) bool {
+		return severityWeight(advs[i].Severity) > severityWeight(advs[j].Severity)
+	})
+	for i, a := range advs {
+		if i >= maxTopAdvisories {
+			break
+		}
+		sev := a.Severity
+		if sev == "" {
+			sev = "UNRATED"
+		}
+		line := a.ID + " [" + sev + "]"
+		if len(a.FixedIn) > 0 {
+			line += " fixed in " + a.FixedIn[0]
+		} else {
+			line += " no fix published"
+		}
+		c.TopAdvisories = append(c.TopAdvisories, line)
+	}
+	return c
 }
 
 // checkHealth is called automatically once per analyze_repository (covering
@@ -331,17 +384,17 @@ func (s *session) checkHealth(top int) string {
 	// Only clean (fully-evaluated) packages go to the model — packages where
 	// the registry lookup 404'd or some other check errored out have no
 	// reliable signal behind them and must never be treated as a finding.
-	out := make([]healthWithUsage, len(clean))
+	out := make([]compactHealth, len(clean))
 	for i, h := range clean {
 		u := byPkg[h.Package]
 		usedIn := "usage not scanned"
 		if s.usage.Rows != nil {
 			usedIn = usageSummary(u)
 		}
-		out[i] = healthWithUsage{Health: h, UsedInProject: usedIn, Classification: classifyUsage(s.usage.Rows != nil, h.Dev, u)}
+		out[i] = compactHealthFor(h, usedIn, classifyUsage(s.usage.Rows != nil, h.Dev, u))
 	}
 
-	b, err := json.MarshalIndent(out, "", "  ")
+	b, err := json.Marshal(out)
 	if err != nil {
 		return "error formatting health report: " + err.Error()
 	}
@@ -487,6 +540,7 @@ func runAgentMode(model string) {
 // model's final answer) is written and opened exactly once, at the end.
 func runAgentTurn(model string, history *[]ollamaMessage, tools []ollamaTool, sess *session) error {
 	toolsRan := false
+	retried := false
 	for hop := 0; hop < maxToolHops; hop++ {
 		think := startSpinner("Thinking")
 		msg, err := chatOllama(model, *history, tools)
@@ -498,6 +552,18 @@ func runAgentTurn(model string, history *[]ollamaMessage, tools []ollamaTool, se
 
 		if len(msg.ToolCalls) == 0 {
 			answer := strings.TrimSpace(msg.Content)
+			// After tools have already run, a final answer that asks the user
+			// for a repo or lockfile is a model failure, not a real question.
+			// Re-prompt once; if it happens again, don't let that text reach
+			// the report as the assessment.
+			if toolsRan && sess.graph != nil && askForInputRe.MatchString(answer) {
+				if !retried {
+					retried = true
+					*history = append(*history, ollamaMessage{Role: "user", Content: "The analysis tools have already run and their results are above. Do not ask for a repository or file. Write the final assessment now, based on that tool output."})
+					continue
+				}
+				answer = "(the model did not produce an assessment; see the tables above)"
+			}
 			// Only the HTML report gets the model's actual assessment text —
 			// the terminal just points at it, so it doesn't end up re-reading
 			// a wall of text it can get in the browser instead.
