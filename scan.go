@@ -507,6 +507,7 @@ func runScan(g *Graph, root, show string, print bool) (string, UsageScan) {
 }
 
 // cloneRepo shallow-clones github.com/<repo> into a temp dir (needs git installed).
+// When GITHUB_TOKEN is set it's embedded in the URL so private repos clone too.
 func cloneRepo(repo, ref string) (string, func(), error) {
 	tmp, err := os.MkdirTemp("", "atlas-*")
 	if err != nil {
@@ -517,10 +518,20 @@ func cloneRepo(repo, ref string) (string, func(), error) {
 	if ref != "" {
 		args = append(args, "--branch", ref)
 	}
-	args = append(args, "https://github.com/"+repo+".git", tmp)
+	cloneURL := "https://github.com/" + repo + ".git"
+	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+		cloneURL = "https://x-access-token:" + tok + "@github.com/" + repo + ".git"
+	}
+	args = append(args, cloneURL, tmp)
 	if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
 		cleanup()
-		return "", nil, fmt.Errorf("git clone failed: %v\n%s", err, out)
+		msg := string(out)
+		// git can echo the clone URL (and therefore the embedded token) in
+		// its error output; never let the token reach the terminal or logs.
+		if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+			msg = strings.ReplaceAll(msg, tok, "***")
+		}
+		return "", nil, fmt.Errorf("git clone failed: %v\n%s", err, msg)
 	}
 	return tmp, cleanup, nil
 }
