@@ -60,7 +60,7 @@ type reportHealthRow struct {
 	BusFactor      string
 	Archived       bool
 	OpenIssues     int
-	Advisories     string
+	AdvisoryItems  []string
 	HasAdvisory    bool
 	UsedIn         string // cross-referenced from the usage scan; "" if usage wasn't scanned
 	Classification string // one of ClassRuntime/ClassTestOnly/ClassConfigReferenced/ClassBuildTooling/ClassUnusedCandidate
@@ -238,7 +238,7 @@ func toReportHealthRows(rows []*Health, usageRows []*Usage) []reportHealthRow {
 			LastPublish: dateOrDash(h.LastPublish),
 			LastCommit:  dateOrDash(h.LastCommit), Contributors: h.ContributorCount,
 			BusFactor: busFactorStr(h), Archived: h.Archived, OpenIssues: h.OpenIssues,
-			Advisories: advisoryStr(h), HasAdvisory: len(h.Advisories) > 0,
+			AdvisoryItems: advisoryItems(h), HasAdvisory: len(h.Advisories) > 0,
 			UsedIn: usedIn, Classification: classifyUsage(usageRows != nil, h.Dev, u),
 		}
 	}
@@ -464,6 +464,10 @@ tr:last-child td{border-bottom:none}
 tbody tr:nth-child(even){background:var(--row-alt)}
 tr.flagged td{background:var(--danger-bg)}
 .pkg{font-weight:600}
+.health-table{min-width:1200px}
+.advisories-cell{white-space:normal;min-width:240px}
+.advisory-item{margin:0 0 6px}
+.advisory-item:last-child{margin-bottom:0}
 .note{display:block;font-weight:400;font-size:11px;color:var(--muted);margin-top:2px;white-space:normal}
 .muted{color:var(--muted)}
 .yes-bad{color:var(--danger);font-weight:600}
@@ -550,9 +554,9 @@ tr.flagged td{background:var(--danger-bg)}
 <section>
 <h2>Dependency health</h2>
 <div class="table-wrap">
-<table>
+<table class="health-table">
 <thead><tr><th>Package</th><th>Version</th><th>Downloads/wk</th><th>Last publish</th><th>Last commit</th>
-<th>Contributors</th><th>Bus factor</th><th>Archived</th><th>Open issues</th><th>Advisories</th><th>Classification</th><th>Used in this project</th></tr></thead>
+<th>Contributors</th><th>Bus factor</th><th>Archived</th><th>Open issues</th><th>Classification</th><th>Used in this project</th><th>Advisories</th></tr></thead>
 <tbody>
 {{range .HealthRows}}
 <tr{{if .HasAdvisory}} class="flagged"{{end}}>
@@ -561,7 +565,6 @@ tr.flagged td{background:var(--danger-bg)}
 <td>{{.Contributors}}</td><td>{{.BusFactor}}</td>
 <td>{{if .Archived}}<span class="yes-bad">yes</span>{{else}}<span class="muted">no</span>{{end}}</td>
 <td>{{.OpenIssues}}</td>
-<td>{{if .Advisories}}{{.Advisories}}{{else}}<span class="muted">&mdash;</span>{{end}}</td>
 <td>{{if eq .Classification "unused-candidate"}}<span class="yes-bad">Unused &mdash; consider removing</span>
 {{- else if eq .Classification "build-tooling"}}<span class="muted">Build tooling (dev dep)</span>
 {{- else if eq .Classification "config-referenced"}}<span class="muted">Config-referenced</span>
@@ -569,6 +572,7 @@ tr.flagged td{background:var(--danger-bg)}
 {{- else if eq .Classification "not-scanned"}}<span class="muted">Not scanned</span>
 {{- else}}<span class="muted">Runtime</span>{{end}}</td>
 <td>{{if .UsedIn}}{{.UsedIn}}{{else}}<span class="muted">not scanned</span>{{end}}</td>
+<td class="advisories-cell">{{if .AdvisoryItems}}{{range .AdvisoryItems}}<div class="advisory-item">{{.}}</div>{{end}}{{else}}<span class="muted">&mdash;</span>{{end}}</td>
 </tr>
 {{end}}
 </tbody>

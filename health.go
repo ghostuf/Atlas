@@ -716,12 +716,12 @@ func formatCount(n int) string {
 	}
 }
 
-// advisoryStr reports each advisory alongside OSV's "fixed in" version(s) —
+// advisoryItems formats each advisory alongside OSV's "fixed in" version(s) —
 // since the query was scoped to the installed version (osvBatchQueryChunk),
 // every advisory listed here already applies to what's actually installed.
-func advisoryStr(h *Health) string {
+func advisoryItems(h *Health) []string {
 	if len(h.Advisories) == 0 {
-		return "-"
+		return nil
 	}
 	parts := make([]string, len(h.Advisories))
 	for i, a := range h.Advisories {
@@ -735,7 +735,16 @@ func advisoryStr(h *Health) string {
 			parts[i] = a.ID + " [" + sev + "] (fixed in " + strings.Join(a.FixedIn, "/") + ")"
 		}
 	}
-	return strings.Join(parts, ", ")
+	return parts
+}
+
+// advisoryStr joins advisoryItems for single-line display (terminal table).
+func advisoryStr(h *Health) string {
+	items := advisoryItems(h)
+	if len(items) == 0 {
+		return "-"
+	}
+	return strings.Join(items, ", ")
 }
 
 // splitHealthProblems separates packages Atlas could actually evaluate from

@@ -531,7 +531,15 @@ func cloneRepo(repo, ref string) (string, func(), error) {
 		if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
 			msg = strings.ReplaceAll(msg, tok, "***")
 		}
-		return "", nil, fmt.Errorf("git clone failed: %v\n%s", err, msg)
+		hint := ""
+		if strings.Contains(msg, "not found") || strings.Contains(msg, "Authentication failed") || strings.Contains(msg, "403") {
+			if os.Getenv("GITHUB_TOKEN") == "" {
+				hint = " -- if this is a private repo, set GITHUB_TOKEN (a token with repo scope) and retry"
+			} else {
+				hint = " -- if this is a private repo, your GITHUB_TOKEN likely lacks access: update its scope to include \"repo\" in GitHub settings (Settings > Developer settings > Personal access tokens) and retry"
+			}
+		}
+		return "", nil, fmt.Errorf("git clone failed: %v\n%s%s", err, msg, hint)
 	}
 	return tmp, cleanup, nil
 }

@@ -239,7 +239,7 @@ func fetchFile(repo, ref, dir, name string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GET %s: %s (does the repo have a committed %q at that path?)", url, resp.Status, name)
+		return nil, fmt.Errorf("GET %s: %s (does the repo have a committed %q at that path?)%s", url, resp.Status, name, githubAccessHint(resp.StatusCode))
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -266,6 +266,19 @@ func fetchFile(repo, ref, dir, name string) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unsupported github content encoding %q", ghFile.Encoding)
 	}
+}
+
+// githubAccessHint explains the most common reason a GitHub API call comes
+// back 404/401/403: the repo is private and GITHUB_TOKEN either isn't set or
+// doesn't have the "repo" scope needed to read it.
+func githubAccessHint(status int) string {
+	if status != 404 && status != 401 && status != 403 {
+		return ""
+	}
+	if os.Getenv("GITHUB_TOKEN") == "" {
+		return " -- if this is a private repo, set GITHUB_TOKEN (a token with repo scope) and retry"
+	}
+	return " -- if this is a private repo, your GITHUB_TOKEN likely lacks access: update its scope to include \"repo\" in GitHub settings (Settings > Developer settings > Personal access tokens) and retry"
 }
 
 // ---------- main ----------
