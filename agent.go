@@ -119,7 +119,26 @@ about analyzing, auditing, or checking a repository's dependencies:
      classification where you should affirmatively recommend removing the
      package from the codebase.
    - "not-scanned": the usage scan didn't run (e.g. source wasn't
-     available) — make no claim about usage either way for these.`
+     available) — make no claim about usage either way for these.
+9. GitHub Issue Creation — two-phase, always requires explicit user consent:
+   PHASE 1 — suggest_github_issues:
+     Call this when the user asks to create GitHub issues, file issues, or
+     open tickets for the findings. It triages health results into structured
+     issue drafts (HIGH/CRITICAL advisories in runtime code, archived repos,
+     abandonment risks with significant blast radius) and returns a formatted
+     preview. After getting the tool result, present the list to the user
+     and ask: "Would you like me to create these X issues in <repo>? (yes/no)"
+     Do NOT call create_github_issues until the user explicitly says yes.
+   PHASE 2 — create_github_issues:
+     Call this ONLY after the user has replied with an explicit yes/confirmation.
+     Never call it speculatively, never call it without a prior
+     suggest_github_issues call in the same session. It deduplicates by
+     fingerprint so calling it twice is safe — but do not call it twice.
+     After it returns, summarise the results (created/skipped/failed) and
+     point the user to the created issue URLs.
+   If the user says no after seeing the preview, acknowledge and do nothing.
+   If the user has not asked about GitHub issues, do not mention or call
+   these tools.`
 
 type session struct {
 	graph   *Graph
@@ -127,8 +146,13 @@ type session struct {
 	repo    string
 	cleanup func()
 
-	usage  UsageScan // zero value (Rows == nil) until scan_usage has run
-	health []*Health // nil until check_health has run
+	usage  UsageScan  // zero value (Rows == nil) until scan_usage has run
+	health []*Health  // nil until check_health has run
+
+	// Issue agent state — set by suggest_github_issues, consumed by create_github_issues.
+	// Storing drafts in the session means the model never has to re-derive them between turns.
+	issueDrafts    []IssueDraft // pre-rendered, ready to POST
+	issueTargetRepo string       // repo issues will be filed in (owner/name)
 }
 
 func (s *session) reset() {
@@ -137,6 +161,7 @@ func (s *session) reset() {
 	}
 	s.graph, s.srcDir, s.repo, s.cleanup = nil, "", "", nil
 	s.usage, s.health = UsageScan{}, nil
+	s.issueDrafts, s.issueTargetRepo = nil, ""
 }
 
 // writeSessionReport builds reports/report.html from everything gathered so
@@ -410,6 +435,154 @@ func (s *session) checkHealth(top int) string {
 	return result
 }
 
+// ---------- issue agent methods ----------
+
+// suggestIssues triages the session's health data, renders fully-formed issue
+// drafts, stores them in session state, and returns a formatted preview the
+// model can present to the user before asking for confirmation. It does NOT
+// create any issues — that only happens when create_github_issues is called.
+func (s *session) suggestIssues(targetRepo string) string {
+	if s.graph == nil {
+		return "error: call analyze_repository first"
+	}
+	if s.health == nil {
+		return "error: health data not available — call check_health first"
+	}
+	if targetRepo == "" {
+		return "error: target_repo is required (owner/name of the repo to file issues in)"
+	}
+
+	s.issueTargetRepo = targetRepo
+
+	clean, _ := splitHealthProblems(s.health)
+	risks := collectRisks(clean, s.usage.Rows, s.graph)
+
+	var drafts []IssueDraft
+	var renderErrs []string
+	for _, r := range risks {
+		draft, err := renderIssueDraft(r)
+		if err != nil {
+			renderErrs = append(renderErrs, err.Error())
+			continue
+		}
+		drafts = append(drafts, draft)
+	}
+	s.issueDrafts = drafts
+
+	if len(drafts) == 0 {
+		s.issueDrafts = nil
+		return "No fiileable issues found. All identified risks are either below the filing threshold " +
+			"(LOW severity, build-tooling, or unused-candidate), or there are no health findings to act on."
+	}
+
+	var sb strings.Builder
+	sb.WriteString(FormatDraftSummary(drafts))
+	sb.WriteString(fmt.Sprintf("\nTarget repo for issues: **%s**\n", targetRepo))
+	if len(renderErrs) > 0 {
+		sb.WriteString(fmt.Sprintf("\nNote: %d draft(s) failed to render and will be skipped: %s\n",
+			len(renderErrs), strings.Join(renderErrs, "; ")))
+	}
+	sb.WriteString("\n**Ask the user if they want to proceed with creating these issues.**")
+	return sb.String()
+}
+
+// createIssues POSTs the stored drafts to GitHub, skipping any that already
+// exist (by fingerprint search). It only runs if issueDrafts is populated by
+// a prior suggest_github_issues call.
+func (s *session) createIssues() string {
+	if len(s.issueDrafts) == 0 {
+		return "error: no issue drafts to create — call suggest_github_issues first"
+	}
+	if s.issueTargetRepo == "" {
+		return "error: target repo not set — call suggest_github_issues first"
+	}
+
+	type result struct {
+		title  string
+		url    string
+		num    int
+		skipped bool
+		skipNum int
+		err    string
+	}
+	var results []result
+
+	for _, draft := range s.issueDrafts {
+		var res result
+		res.title = draft.Title
+
+		existsVal, err := withSpinnerResult(
+			fmt.Sprintf("Checking for duplicate: %s", draft.Risk.Package),
+			func() (any, error) {
+				e, n, err := issueAlreadyExists(s.issueTargetRepo, draft.Fingerprint)
+				return []any{e, n}, err
+			},
+		)
+		if err != nil {
+			res.err = "dedup check failed: " + err.Error()
+			results = append(results, res)
+			continue
+		}
+		pair := existsVal.([]any)
+		if pair[0].(bool) {
+			res.skipped = true
+			res.skipNum = pair[1].(int)
+			results = append(results, res)
+			continue
+		}
+
+		created, err := withSpinnerResult(
+			fmt.Sprintf("Creating issue: %s", draft.Risk.Package),
+			func() (any, error) {
+				return createGithubIssue(s.issueTargetRepo, draft)
+			},
+		)
+		if err != nil {
+			res.err = err.Error()
+		} else {
+			gi := created.(githubCreatedIssue)
+			res.url = gi.HTMLURL
+			res.num = gi.Number
+		}
+		results = append(results, res)
+	}
+
+	// Clear drafts so a second accidental call doesn't re-file.
+	s.issueDrafts = nil
+
+	var sb strings.Builder
+	created, skipped, failed := 0, 0, 0
+	for _, r := range results {
+		if r.err != "" {
+			failed++
+			sb.WriteString(fmt.Sprintf("❌ FAILED  — %s\n   error: %s\n", r.title, r.err))
+		} else if r.skipped {
+			skipped++
+			sb.WriteString(fmt.Sprintf("⏭  SKIPPED — %s\n   already exists: %s/issues/%d\n",
+				r.title, "https://github.com/"+s.issueTargetRepo, r.skipNum))
+		} else {
+			created++
+			sb.WriteString(fmt.Sprintf("✅ CREATED — %s\n   %s\n", r.title, r.url))
+		}
+	}
+	sb.WriteString(fmt.Sprintf("\nSummary: %d created · %d skipped (already exist) · %d failed\n",
+		created, skipped, failed))
+	return sb.String()
+}
+
+// withSpinnerResult is a helper that wraps withSpinner for functions that
+// return a value alongside the error — needed because withSpinner only
+// supports `func() error`.
+func withSpinnerResult(label string, fn func() (any, error)) (any, error) {
+	var val any
+	err := withSpinner(label, func() error {
+		var e error
+		val, e = fn()
+		return e
+	})
+	return val, err
+}
+
 // ---------- tool schemas + dispatch ----------
 
 func agentTools() []ollamaTool {
@@ -441,6 +614,24 @@ func agentTools() []ollamaTool {
 					"top": map[string]any{"type": "integer", "description": "additionally check this many extra packages ranked by blast radius, beyond the direct dependencies (optional, default 0)"},
 				},
 			}),
+		newTool("suggest_github_issues",
+			"Triage the health findings and render fully-formed GitHub issue drafts for all risks that meet the filing threshold (HIGH/CRITICAL advisories in production code, archived repos, abandonment risks). Returns a structured preview of what will be filed. ALWAYS call this before create_github_issues, and ALWAYS show the preview to the user and ask for explicit confirmation before calling create_github_issues.",
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"target_repo": map[string]any{
+						"type":        "string",
+						"description": "GitHub repo to file issues in, as owner/name — must be the target project repo, not the analysed repo (though they can be the same).",
+					},
+				},
+				"required": []string{"target_repo"},
+			}),
+		newTool("create_github_issues",
+			"POST the pre-rendered issue drafts from suggest_github_issues to GitHub. Call this ONLY after the user has explicitly confirmed they want to proceed. Issues are deduplicated by fingerprint — calling this twice is safe. Returns a per-issue result (created / skipped / failed).",
+			map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			}),
 	}
 }
 
@@ -467,6 +658,14 @@ func dispatchTool(tc ollamaToolCall, sess *session) string {
 		}
 		_ = json.Unmarshal(tc.Function.Arguments, &args)
 		return sess.checkHealth(args.Top)
+	case "suggest_github_issues":
+		var args struct {
+			TargetRepo string `json:"target_repo"`
+		}
+		_ = json.Unmarshal(tc.Function.Arguments, &args)
+		return sess.suggestIssues(args.TargetRepo)
+	case "create_github_issues":
+		return sess.createIssues()
 	default:
 		return "unknown tool: " + tc.Function.Name
 	}

@@ -2,3 +2,5 @@
 .env
 reports/
 /atlas
+*.exe
+*.exe~
