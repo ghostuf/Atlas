@@ -488,6 +488,18 @@ tr.flagged td { background: rgba(255, 77, 79, 0.18); color: #ffece8; }
   margin: 20px 0 8px;
   font-weight: 500;
 }
+.reasoning h3 { font-size: 21px; }
+.reasoning h4 { font-size: 18px; }
+.reasoning h5, .reasoning h6 { font-size: 16px; }
+.reasoning h3:first-child, .reasoning h4:first-child { margin-top: 0; }
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 7px;
+  vertical-align: middle;
+}
 .reasoning code {
   background: var(--bg);
   border: 1px solid var(--sub);
@@ -598,12 +610,12 @@ tr.flagged td { background: rgba(255, 77, 79, 0.18); color: #ffece8; }
 <td>{{.Contributors}}</td><td>{{.BusFactor}}</td>
 <td>{{if .Archived}}<span class="yes-bad">yes</span>{{else}}<span class="muted">no</span>{{end}}</td>
 <td>{{.OpenIssues}}</td>
-<td>{{if eq .Classification "unused-candidate"}}<span class="yes-bad">Unused &mdash; consider removing</span>
-{{- else if eq .Classification "build-tooling"}}<span class="muted">Build tooling (dev dep)</span>
-{{- else if eq .Classification "config-referenced"}}<span class="muted">Config-referenced</span>
-{{- else if eq .Classification "test-only"}}<span class="muted">Test-only</span>
-{{- else if eq .Classification "not-scanned"}}<span class="muted">Not scanned</span>
-{{- else}}<span class="muted">Runtime</span>{{end}}</td>
+<td>{{if eq .Classification "unused-candidate"}}<span class="status-dot" style="background:var(--error)"></span>Unused &mdash; consider removing
+{{- else if eq .Classification "build-tooling"}}Build tooling (dev dep)
+{{- else if eq .Classification "config-referenced"}}Config-referenced
+{{- else if eq .Classification "test-only"}}Test-only
+{{- else if eq .Classification "not-scanned"}}Not scanned
+{{- else}}Runtime{{end}}</td>
 <td>{{if .UsedIn}}{{.UsedIn}}{{else}}<span class="muted">not scanned</span>{{end}}</td>
 <td class="advisories-cell">{{if .AdvisoryItems}}{{range .AdvisoryItems}}<div class="advisory-item">{{.}}</div>{{end}}{{else}}<span class="muted">&mdash;</span>{{end}}</td>
 </tr>

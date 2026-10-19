@@ -495,6 +495,36 @@ func ListFiles(files []string) string {
 	return strings.Join(files, ", ")
 }
 
+// UsageDetailMarkdown renders every file that references a package, grouped
+// by evidence tier, with no truncation — unlike UsageSummary/ListFiles (which
+// collapse to a count past maxUsageFilesListed for compact table display),
+// this is meant for a GitHub issue body where naming the exact files matters
+// more than staying short.
+func UsageDetailMarkdown(u *Usage) string {
+	if u == nil {
+		return "Not imported anywhere in the scanned source — no usage evidence found."
+	}
+	var sb strings.Builder
+	section := func(label string, files map[string]bool) {
+		if len(files) == 0 {
+			return
+		}
+		list := SortedFileList(files)
+		sb.WriteString(fmt.Sprintf("**%s (%d):**\n", label, len(list)))
+		for _, f := range list {
+			sb.WriteString("- `" + f + "`\n")
+		}
+		sb.WriteString("\n")
+	}
+	section("Production files", u.ProdFiles)
+	section("Test files", u.TestFiles)
+	section("Config references", u.ConfigFiles)
+	if sb.Len() == 0 {
+		return "No usage evidence found in the scanned source (no import, no config reference)."
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
 // UsageSummary renders how deeply a package is actually used in this project.
 func UsageSummary(u *Usage) string {
 	if u == nil {

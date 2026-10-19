@@ -404,7 +404,7 @@ func RenderIssueDraft(r IssueableRisk) (IssueDraft, error) {
 		GithubRepo:       h.GithubRepo,
 		RiskHeading:      riskHeading(r),
 		FindingBody:      renderFindingBody(r),
-		UsedIn:           r.UsedIn,
+		UsedIn:           core.UsageDetailMarkdown(r.Usage),
 		BlastRadius:      r.BlastRadius,
 		BlastDetail:      renderBlastDetail(r),
 		Remediation:      renderRemediation(r),

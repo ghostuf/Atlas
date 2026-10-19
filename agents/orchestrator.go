@@ -38,26 +38,52 @@ about analyzing, auditing, or checking a repository's dependencies:
    combined HTML report (graph + usage scan + health check + multi-agent
    assessments + your own answer) is generated and opened automatically.
    Write your final answer as a clear assessment: what's load-bearing,
-   what's risky, and concretely what to do about it.
+   what's risky, and concretely what to do about it. You can mention that
+   issues could be filed for the worst findings, but don't worry about
+   stating an exact count — the CLI automatically prints a separate,
+   precisely-computed offer to the user right after your answer (something
+   like "Atlas found N issue(s) worth filing... say the word"), so you don't
+   need to carry that number yourself. Do not call suggest_github_issues
+   yet — wait for the user's reply to that offer.
 4. When judging abandonment/bus-factor risk, read bus factor together with
    contributor count and weekly downloads.
-5. GitHub Issue Creation — two-phase, always requires explicit user consent:
-   PHASE 1 — suggest_github_issues:
-     Call this when the user asks to create GitHub issues or open tickets.
-     It triages health results into structured issue drafts, checks for
-     duplicates concurrently, and returns a formatted preview. Ask the user:
-     "Would you like me to create these X issues in <repo>? (yes/no)"
-     Do NOT call create_github_issues until the user explicitly confirms.
-   PHASE 2 — create_github_issues:
-     Call this ONLY after the user has replied with an explicit yes.
-     It creates issues concurrently with rate-limiting. Summarize the results.`
+5. GitHub Issue Creation — three-step, always requires two explicit user
+   confirmations before anything is written to GitHub:
+   STEP 1 — the user says yes to your offer (or asks to file issues directly):
+     Call suggest_github_issues. It triages health results into structured
+     issue drafts and checks for duplicates concurrently. Relay its output
+     verbatim-ish as your final answer: the exact count and list of issues
+     it would create, then ask again: "Shall I go ahead and create these N
+     issues in <repo>? (yes/no)" Do NOT call create_github_issues yet.
+   STEP 2 — the user confirms that list:
+     Call create_github_issues. It creates issues concurrently with
+     rate-limiting and returns a per-issue created/skipped/failed result.
+     If the user only wants a subset (e.g. "just the top 2", "only the
+     critical ones"), you MUST pass that number as the count argument —
+     the pending list from suggest_github_issues is already sorted
+     severity-first, so count takes exactly the first N of it. Never just
+     say in words that you'll only create some of them while leaving count
+     unset — that creates ALL pending drafts regardless of what you said.
+   STEP 3 — report the outcome in the chat, not the report:
+     Your final answer after create_github_issues must restate the result
+     directly to the user in plain language (how many created, with links;
+     how many skipped as duplicates; how many failed and why) — this does
+     NOT go into the HTML report, so say it plainly in the chat yourself.
+     If every failure mentions a 401/403 or "lacks 'repo' scope", don't just
+     repeat the raw error — tell the user plainly: their GITHUB_TOKEN doesn't
+     have permission to create issues in that repo, they should update its
+     scope to include "repo" (or, for a fine-grained token, add "Issues:
+     Read and write" for that repo) in GitHub settings, and come back and
+     ask again once it's updated. Never call create_github_issues again on
+     the same drafts without a fresh explicit yes from the user.`
 
 // Session tracks the active analysis state in a conversation.
 type Session struct {
-	Graph   *core.Graph
-	SrcDir  string
-	Repo    string
-	Cleanup func()
+	Graph      *core.Graph
+	SrcDir     string
+	Repo       string
+	GithubRepo string // owner/name; empty when analysis came from a local lockfile, not a GitHub repo
+	Cleanup    func()
 
 	Usage  core.UsageScan
 	Health []*core.Health
@@ -71,7 +97,7 @@ func (s *Session) Reset() {
 	if s.Cleanup != nil {
 		s.Cleanup()
 	}
-	s.Graph, s.SrcDir, s.Repo, s.Cleanup = nil, "", "", nil
+	s.Graph, s.SrcDir, s.Repo, s.GithubRepo, s.Cleanup = nil, "", "", "", nil
 	s.Usage, s.Health = core.UsageScan{}, nil
 	s.Profiles, s.IssueDrafts, s.IssueTargetRepo = nil, nil, ""
 }
@@ -156,6 +182,7 @@ func (o *OrchestratorAgent) AnalyzeRepository(repo, file, ref, dir string) strin
 	core.Detail("%d packages, %d edges, %d direct dependencies", len(g.Nodes), edges, direct)
 
 	o.sess.Graph = g
+	o.sess.GithubRepo = repo
 	if repo != "" {
 		o.sess.Repo = repo
 	} else {
@@ -535,8 +562,12 @@ func (o *OrchestratorAgent) SuggestIssues(targetRepo string) string {
 	return sb.String()
 }
 
-// CreateIssues creates stored drafts concurrently with rate-limiting.
-func (o *OrchestratorAgent) CreateIssues() string {
+// CreateIssues creates stored drafts concurrently with rate-limiting. If count
+// is > 0 and smaller than the number of pending drafts, only the first count
+// (the list is already sorted severity-first) are created; the rest stay
+// pending in the session so a later "create the rest" doesn't need a fresh
+// suggest_github_issues call.
+func (o *OrchestratorAgent) CreateIssues(count int) string {
 	if len(o.sess.IssueDrafts) == 0 {
 		return "error: no issue drafts to create — call suggest_github_issues first"
 	}
@@ -548,7 +579,12 @@ func (o *OrchestratorAgent) CreateIssues() string {
 	defer cancel()
 
 	drafts := o.sess.IssueDrafts
-	o.sess.IssueDrafts = nil // Clear drafts so re-calling doesn't duplicate
+	if count > 0 && count < len(drafts) {
+		drafts = drafts[:count]
+		o.sess.IssueDrafts = o.sess.IssueDrafts[count:] // remainder stays pending
+	} else {
+		o.sess.IssueDrafts = nil // Clear drafts so re-calling doesn't duplicate
+	}
 
 	results := o.actionAg.CreateIssuesConcurrently(ctx, o.sess.IssueTargetRepo, drafts)
 
@@ -568,6 +604,9 @@ func (o *OrchestratorAgent) CreateIssues() string {
 		}
 	}
 	sb.WriteString(fmt.Sprintf("\nSummary: %d created · %d skipped · %d failed\n", created, skipped, failed))
+	if remaining := len(o.sess.IssueDrafts); remaining > 0 {
+		sb.WriteString(fmt.Sprintf("\n%d issue(s) from the original list were left out and are still pending — say the word if you want those created too.\n", remaining))
+	}
 	return sb.String()
 }
 
@@ -652,8 +691,10 @@ func (o *OrchestratorAgent) AgentTools() []core.OllamaTool {
 		core.NewTool("create_github_issues",
 			"POST pre-rendered issue drafts to GitHub with concurrency rate-limiting. Call ONLY after explicit user confirmation.",
 			map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
+				"type": "object",
+				"properties": map[string]any{
+					"count": map[string]any{"type": "integer", "description": "only create this many issues, taking the first N from the pending list (already sorted severity-first); omit or 0 to create all pending drafts"},
+				},
 			}),
 	}
 }
@@ -688,7 +729,11 @@ func (o *OrchestratorAgent) DispatchTool(tc core.OllamaToolCall) string {
 		_ = json.Unmarshal(tc.Function.Arguments, &args)
 		return o.SuggestIssues(args.TargetRepo)
 	case "create_github_issues":
-		return o.CreateIssues()
+		var args struct {
+			Count int `json:"count"`
+		}
+		_ = json.Unmarshal(tc.Function.Arguments, &args)
+		return o.CreateIssues(args.Count)
 	default:
 		return "unknown tool: " + tc.Function.Name
 	}
@@ -752,8 +797,19 @@ func RunAgentMode(model string) {
 
 const maxToolHops = 6
 
+// analysisTools are the tools whose output belongs in the regenerated HTML
+// report. Action tools (issue suggest/create) are deliberately excluded: their
+// status is conversational and must be read directly in the chat, not
+// discovered by re-opening a silently-rewritten report.
+var analysisTools = map[string]bool{
+	"analyze_repository": true,
+	"scan_usage":          true,
+	"check_health":        true,
+}
+
 func (o *OrchestratorAgent) RunTurn(model string, history *[]core.OllamaMessage, tools []core.OllamaTool) error {
 	toolsRan := false
+	analysisRan := false
 	retried := false
 	for hop := 0; hop < maxToolHops; hop++ {
 		think := core.StartSpinner("Thinking")
@@ -778,7 +834,7 @@ func (o *OrchestratorAgent) RunTurn(model string, history *[]core.OllamaMessage,
 				answer = "(the model did not produce an assessment; see the tables above)"
 			}
 
-			if toolsRan && o.sess.Graph != nil {
+			if analysisRan && o.sess.Graph != nil {
 				o.announceReport(answer)
 			} else {
 				fmt.Println("\natlas> " + core.StripInlineMarkdown(answer))
@@ -792,13 +848,16 @@ func (o *OrchestratorAgent) RunTurn(model string, history *[]core.OllamaMessage,
 			return calls[i].Function.Name == "analyze_repository" && calls[j].Function.Name != "analyze_repository"
 		})
 		for _, tc := range calls {
+			if analysisTools[tc.Function.Name] {
+				analysisRan = true
+			}
 			result := o.DispatchTool(tc)
 			*history = append(*history, core.OllamaMessage{Role: "tool", Content: result})
 		}
 	}
 
 	fmt.Println("\natlas> (stopped after several tool calls without a final answer — try a more specific question)")
-	if o.sess.Graph != nil {
+	if analysisRan && o.sess.Graph != nil {
 		o.announceReport("(stopped after several tool calls without a final answer)")
 	}
 	return nil
@@ -811,4 +870,33 @@ func (o *OrchestratorAgent) announceReport(reasoning string) {
 		return
 	}
 	fmt.Printf("\n✓ Prepared report: %s — open in your browser to inspect interactive graphs and multi-agent risk profiles.\n", path)
+	o.printIssueOffer()
+}
+
+// printIssueOffer prints a deterministic, code-computed nudge to the chat
+// (never the report) offering to file GitHub issues, when there's anything
+// fileable. This doesn't depend on the model remembering to mention it in
+// its free-form answer — that text only ever ends up in the report, not
+// the terminal, so the offer would otherwise go unseen.
+func (o *OrchestratorAgent) printIssueOffer() {
+	if o.sess.GithubRepo == "" || o.sess.Health == nil || len(o.sess.IssueDrafts) > 0 {
+		return
+	}
+	clean, _ := core.SplitHealthProblems(o.sess.Health)
+	risks := CollectRisks(clean, o.sess.Usage.Rows, o.sess.Graph)
+	if len(risks) == 0 {
+		return
+	}
+	counts := map[IssueSeverity]int{}
+	for _, r := range risks {
+		counts[r.EffectiveSev]++
+	}
+	var parts []string
+	for _, sev := range []IssueSeverity{SeverityCritical, SeverityHigh, SeverityModerate, SeverityLow} {
+		if counts[sev] > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", counts[sev], strings.ToLower(string(sev))))
+		}
+	}
+	fmt.Printf("\n💡 Atlas found %d issue(s) worth filing in %s (%s). Say the word and I'll draft and create them as GitHub issues.\n",
+		len(risks), o.sess.GithubRepo, strings.Join(parts, ", "))
 }
