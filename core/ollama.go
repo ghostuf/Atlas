@@ -1,7 +1,7 @@
-package main
+package core
 
 // Minimal client for a local Ollama instance (https://ollama.com), used to
-// drive the interactive tool-calling agent. Stdlib only, no SDK.
+// drive the interactive tool-calling agent and specialist analysis agents.
 
 import (
 	"bytes"
@@ -14,7 +14,8 @@ import (
 	"time"
 )
 
-func ollamaBaseURL() string {
+// OllamaBaseURL returns the configured or default Ollama host.
+func OllamaBaseURL() string {
 	h := os.Getenv("OLLAMA_HOST")
 	if h == "" {
 		return "http://localhost:11434"
@@ -53,20 +54,20 @@ func httpPostJSON(url string, payload, out any) error {
 
 // ---------- chat + tool calling ----------
 
-type ollamaToolCall struct {
+type OllamaToolCall struct {
 	Function struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	} `json:"function"`
 }
 
-type ollamaMessage struct {
+type OllamaMessage struct {
 	Role      string           `json:"role"`
 	Content   string           `json:"content"`
-	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
+	ToolCalls []OllamaToolCall `json:"tool_calls,omitempty"`
 }
 
-type ollamaTool struct {
+type OllamaTool struct {
 	Type     string `json:"type"`
 	Function struct {
 		Name        string         `json:"name"`
@@ -75,8 +76,9 @@ type ollamaTool struct {
 	} `json:"function"`
 }
 
-func newTool(name, description string, parameters map[string]any) ollamaTool {
-	var t ollamaTool
+// NewTool creates an OllamaTool definition.
+func NewTool(name, description string, parameters map[string]any) OllamaTool {
+	var t OllamaTool
 	t.Type = "function"
 	t.Function.Name = name
 	t.Function.Description = description
@@ -84,46 +86,55 @@ func newTool(name, description string, parameters map[string]any) ollamaTool {
 	return t
 }
 
-type ollamaOptions struct {
+type OllamaOptions struct {
 	NumCtx     int `json:"num_ctx,omitempty"`
 	NumPredict int `json:"num_predict,omitempty"`
 }
 
-type ollamaChatRequest struct {
+type OllamaChatRequest struct {
 	Model    string          `json:"model"`
-	Messages []ollamaMessage `json:"messages"`
-	Tools    []ollamaTool    `json:"tools,omitempty"`
+	Messages []OllamaMessage `json:"messages"`
+	Tools    []OllamaTool    `json:"tools,omitempty"`
 	Stream   bool            `json:"stream"`
-	Options  ollamaOptions   `json:"options"`
+	Format   any             `json:"format,omitempty"` // json schema or "json"
+	Options  OllamaOptions   `json:"options"`
 }
 
-type ollamaChatResponse struct {
-	Message ollamaMessage `json:"message"`
+type OllamaChatResponse struct {
+	Message OllamaMessage `json:"message"`
 	Done    bool          `json:"done"`
 }
 
-// Without an explicit num_ctx, Ollama falls back to a small default context
-// window regardless of what the model actually supports — with a system
-// prompt plus large tool-result JSON (full advisory lists, graph tables),
-// that's easily enough to silently overflow and cut the model's own answer
-// short mid-sentence. 16384 comfortably fits a typical Atlas session on
-// every model this agent supports (qwen3:8b natively supports 40960,
-// gemma4:e4b 128k) without being wastefully large.
 const (
-	ollamaNumCtx     = 16384
-	ollamaNumPredict = 4096
+	OllamaNumCtx     = 16384
+	OllamaNumPredict = 4096
 )
 
-func chatOllama(model string, messages []ollamaMessage, tools []ollamaTool) (ollamaMessage, error) {
-	req := ollamaChatRequest{
+// ChatOllama sends a chat request with optional tools to Ollama.
+func ChatOllama(model string, messages []OllamaMessage, tools []OllamaTool) (OllamaMessage, error) {
+	req := OllamaChatRequest{
 		Model: model, Messages: messages, Tools: tools, Stream: false,
-		Options: ollamaOptions{NumCtx: ollamaNumCtx, NumPredict: ollamaNumPredict},
+		Options: OllamaOptions{NumCtx: OllamaNumCtx, NumPredict: OllamaNumPredict},
 	}
-	var resp ollamaChatResponse
-	if err := httpPostJSON(ollamaBaseURL()+"/api/chat", req, &resp); err != nil {
-		return ollamaMessage{}, err
+	var resp OllamaChatResponse
+	if err := httpPostJSON(OllamaBaseURL()+"/api/chat", req, &resp); err != nil {
+		return OllamaMessage{}, err
 	}
 	return resp.Message, nil
+}
+
+// ChatOllamaJSON sends a prompt and requests structured JSON output constrained by formatSchema.
+func ChatOllamaJSON(model string, messages []OllamaMessage, formatSchema any) (string, error) {
+	req := OllamaChatRequest{
+		Model: model, Messages: messages, Stream: false,
+		Format:  formatSchema,
+		Options: OllamaOptions{NumCtx: OllamaNumCtx, NumPredict: OllamaNumPredict},
+	}
+	var resp OllamaChatResponse
+	if err := httpPostJSON(OllamaBaseURL()+"/api/chat", req, &resp); err != nil {
+		return "", err
+	}
+	return resp.Message.Content, nil
 }
 
 // ---------- availability check ----------
@@ -134,11 +145,11 @@ type ollamaTagsResponse struct {
 	} `json:"models"`
 }
 
-// checkOllamaModel confirms Ollama is reachable and the requested model is pulled.
-func checkOllamaModel(model string) error {
-	body, status, err := httpGet(ollamaBaseURL()+"/api/tags", nil)
+// CheckOllamaModel confirms Ollama is reachable and the requested model is pulled.
+func CheckOllamaModel(model string) error {
+	body, status, err := HttpGet(OllamaBaseURL()+"/api/tags", nil)
 	if err != nil {
-		return fmt.Errorf("could not reach Ollama at %s (is `ollama serve` running?): %w", ollamaBaseURL(), err)
+		return fmt.Errorf("could not reach Ollama at %s (is `ollama serve` running?): %w", OllamaBaseURL(), err)
 	}
 	if status != 200 {
 		return fmt.Errorf("ollama /api/tags returned %s", http.StatusText(status))

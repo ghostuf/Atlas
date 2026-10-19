@@ -1,14 +1,11 @@
-package main
+package core
 
 // A single 0-100 health score summarizing a repo's dependency risk —
 // computed deterministically from signals Atlas already gathers (advisory
 // severity, abandonment risk, archived repos, unused-candidate bloat), not
-// an AI judgment call. Reproducible and auditable, same philosophy as bus
-// factor or the usage classification.
+// an AI judgment call.
 
-// RepoScore is the computed score plus its matching status label/color from
-// the fixed four-step status scale (good/warning/serious/critical) — never
-// an eyeballed rainbow.
+// RepoScore is the computed score plus its matching status label/color.
 type RepoScore struct {
 	Value int
 	Label string
@@ -27,7 +24,8 @@ const (
 	unusedCandidatePenalty = 3.0  // flat codebase-hygiene/bloat deduction, separate from any advisory
 )
 
-func severityWeight(sev string) float64 {
+// SeverityWeight returns the numeric weight for an advisory severity string.
+func SeverityWeight(sev string) float64 {
 	switch sev {
 	case "CRITICAL":
 		return severityWeightCritical
@@ -42,11 +40,8 @@ func severityWeight(sev string) float64 {
 	}
 }
 
-// usageWeight scales how much an issue on this package should count toward
-// the overall score — a vulnerability wired into production code is a much
-// bigger deal than the same vulnerability on a test-only or
-// convention-loaded build tool.
-func usageWeight(class string) float64 {
+// UsageWeight scales how much an issue on this package counts toward the score.
+func UsageWeight(class string) float64 {
 	switch class {
 	case ClassRuntime:
 		return 1.0
@@ -61,11 +56,13 @@ func usageWeight(class string) float64 {
 	}
 }
 
-func isAbandonmentRisk(h *Health) bool {
+// IsAbandonmentRisk checks if a dependency is at severe risk of abandonment.
+func IsAbandonmentRisk(h *Health) bool {
 	return h.TopContributor != "" && h.BusFactor >= 0.7 && h.ContributorCount <= 3 && h.WeeklyDownloads < 10000
 }
 
-func scoreLabel(v int) string {
+// ScoreLabel returns the text tier for a score.
+func ScoreLabel(v int) string {
 	switch {
 	case v >= 80:
 		return "Good"
@@ -78,25 +75,22 @@ func scoreLabel(v int) string {
 	}
 }
 
-// scoreColor uses the dataviz skill's fixed, validated status palette
-// (good/warning/serious/critical) — never an eyeballed gradient.
-func scoreColor(v int) string {
+// ScoreColor returns the hex color for a score matching the iv_spade palette.
+func ScoreColor(v int) string {
 	switch {
 	case v >= 80:
-		return "#0ca30c" // status good
+		return "#b7976a" // --main (accent gold)
 	case v >= 60:
-		return "#fab219" // status warning
+		return "#d3c2c3" // --text (primary off-white)
 	case v >= 40:
-		return "#ec835a" // status serious
+		return "#ff7875" // --error-extra (bright coral red)
 	default:
-		return "#d03b3b" // status critical
+		return "#ff4d4f" // --error (high contrast bright red)
 	}
 }
 
-// computeRepoScore scores only cleanly-evaluated packages (clean, from
-// splitHealthProblems) — rows in the "Problems" bucket have no reliable
-// signal to score them on, so they're excluded entirely rather than guessed at.
-func computeRepoScore(clean []*Health, usageRows []*Usage, scanned bool) RepoScore {
+// ComputeRepoScore calculates the overall repository health score.
+func ComputeRepoScore(clean []*Health, usageRows []*Usage, scanned bool) RepoScore {
 	byPkg := map[string]*Usage{}
 	for _, u := range usageRows {
 		byPkg[u.Package] = u
@@ -104,12 +98,12 @@ func computeRepoScore(clean []*Health, usageRows []*Usage, scanned bool) RepoSco
 
 	penalty := 0.0
 	for _, h := range clean {
-		class := classifyUsage(scanned, h.Dev, byPkg[h.Package])
-		w := usageWeight(class)
+		class := ClassifyUsage(scanned, h.Dev, byPkg[h.Package])
+		w := UsageWeight(class)
 		for _, a := range h.Advisories {
-			penalty += severityWeight(a.Severity) * w
+			penalty += SeverityWeight(a.Severity) * w
 		}
-		if isAbandonmentRisk(h) {
+		if IsAbandonmentRisk(h) {
 			penalty += abandonmentPenalty * w
 		}
 		if h.Archived {
@@ -127,5 +121,5 @@ func computeRepoScore(clean []*Health, usageRows []*Usage, scanned bool) RepoSco
 	if value > 100 {
 		value = 100
 	}
-	return RepoScore{Value: value, Label: scoreLabel(value), Color: scoreColor(value)}
+	return RepoScore{Value: value, Label: ScoreLabel(value), Color: ScoreColor(value)}
 }

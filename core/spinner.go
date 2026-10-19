@@ -1,4 +1,4 @@
-package main
+package core
 
 // A small animated terminal status line: a rotating glyph plus an elapsed
 // timer, redrawn in place (like "✶ Fetching lockfile… (2s)") so long-running
@@ -12,14 +12,15 @@ import (
 
 var spinnerFrames = []string{"✶", "✸", "✹", "✺", "✹", "✷"}
 
-type spinner struct {
+// Spinner represents an animated terminal spinner.
+type Spinner struct {
 	stop chan struct{}
 	done chan struct{}
 }
 
-// startSpinner renders an animated, elapsed-time status line until stopped.
-func startSpinner(label string) *spinner {
-	s := &spinner{stop: make(chan struct{}), done: make(chan struct{})}
+// StartSpinner renders an animated, elapsed-time status line until stopped.
+func StartSpinner(label string) *Spinner {
+	s := &Spinner{stop: make(chan struct{}), done: make(chan struct{})}
 	go func() {
 		defer close(s.done)
 		start := time.Now()
@@ -45,10 +46,8 @@ func startSpinner(label string) *spinner {
 	return s
 }
 
-// finish stops the spinner and leaves a permanent ✓/✗ status line behind —
-// used for steps worth a visible record once they're done (fetched the
-// lockfile, cloned the repo, etc.).
-func (s *spinner) finish(ok bool, label string) {
+// Finish stops the spinner and leaves a permanent ✓/✗ status line behind.
+func (s *Spinner) Finish(ok bool, label string) {
 	close(s.stop)
 	<-s.done
 	mark := "✓"
@@ -58,25 +57,34 @@ func (s *spinner) finish(ok bool, label string) {
 	fmt.Printf("%s %s\n", mark, label)
 }
 
-// detail prints a short, dimmed sub-line under the most recent ✓/✗ line —
-// the gist of what a stage found (counts, a path), not the full table.
-func detail(format string, args ...any) {
+// Detail prints a short, dimmed sub-line under the most recent ✓/✗ line.
+func Detail(format string, args ...any) {
 	fmt.Printf("  \x1b[2m%s\x1b[0m\n", fmt.Sprintf(format, args...))
 }
 
-// stopSilent stops the spinner and clears the line with no trace left behind
-// — used for the "waiting on the model" spinner, where there's nothing
-// worth permanently logging once it's done.
-func (s *spinner) stopSilent() {
+// StopSilent stops the spinner and clears the line with no trace left behind.
+func (s *Spinner) StopSilent() {
 	close(s.stop)
 	<-s.done
 }
 
-// withSpinner runs fn while showing an animated status line for label, then
+// WithSpinner runs fn while showing an animated status line for label, then
 // leaves a ✓/✗ line behind once it's done.
-func withSpinner(label string, fn func() error) error {
-	s := startSpinner(label)
+func WithSpinner(label string, fn func() error) error {
+	s := StartSpinner(label)
 	err := fn()
-	s.finish(err == nil, label)
+	s.Finish(err == nil, label)
 	return err
+}
+
+// WithSpinnerResult is a generic helper that wraps WithSpinner for functions
+// that return a value alongside the error.
+func WithSpinnerResult[T any](label string, fn func() (T, error)) (T, error) {
+	var val T
+	err := WithSpinner(label, func() error {
+		var e error
+		val, e = fn()
+		return e
+	})
+	return val, err
 }

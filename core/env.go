@@ -1,4 +1,4 @@
-package main
+package core
 
 // Minimal .env support: KEY=VALUE per line, blank lines and '#' comments
 // skipped, quotes around the value optional. Real environment variables
@@ -10,7 +10,8 @@ import (
 	"strings"
 )
 
-func loadDotEnv(path string) {
+// LoadDotEnv loads environment variables from a .env file.
+func LoadDotEnv(path string) {
 	f, err := os.Open(path)
 	if err != nil {
 		return // no .env file present: nothing to do

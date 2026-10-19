@@ -1,4 +1,4 @@
-package main
+package core
 
 // Step 2: find where each direct dependency is actually used in the source tree,
 // and collect small code snippets ("usage sites") that the LLM will later read.
@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -30,11 +30,6 @@ var srcExts = map[string]bool{
 	".js": true, ".jsx": true, ".mjs": true, ".cjs": true, ".ts": true, ".tsx": true,
 }
 
-// configFileNames are files read for the secondary "referenced by name"
-// pass (below) even though they're not application source code — config
-// files are exactly where build-tool plugins get named without ever being
-// require()'d or import'd anywhere (ESLint "extends", Babel "presets", a
-// Grunt config object, npm "scripts", etc).
 var configFileNames = map[string]bool{
 	"package.json":       true,
 	".eslintrc":          true,
@@ -49,20 +44,11 @@ var configFileNames = map[string]bool{
 	".commitlintrc.json": true,
 }
 
-// packageJSONDepKeys lists package.json's own dependency-listing fields —
-// every direct dependency trivially appears there by definition (that's
-// what makes it a direct dependency), so searching those fields would mark
-// every single package as "config-referenced" regardless of real usage.
-// They're stripped out before the bare-name search runs on package.json.
 var packageJSONDepKeys = []string{
 	"dependencies", "devDependencies", "peerDependencies",
 	"optionalDependencies", "bundledDependencies", "bundleDependencies",
 }
 
-// packageJSONSearchText returns package.json's content with the dependency
-// list fields removed, so only the fields that actually mean something
-// ("scripts", "eslintConfig", "babel", "prettier", "jest", ...) are
-// searched. Returns "" if the file isn't valid JSON.
 func packageJSONSearchText(data []byte) string {
 	var m map[string]json.RawMessage
 	if json.Unmarshal(data, &m) != nil {
@@ -86,7 +72,6 @@ func isConfigFile(name string) bool {
 	return strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml")
 }
 
-// Cheap path-based hints about which architectural area a file belongs to.
 var tagKeywords = map[string][]string{
 	"auth":       {"auth", "login", "session", "passport", "jwt", "token"},
 	"db":         {"db", "database", "model", "repository", "prisma", "sql", "migration"},
@@ -95,6 +80,7 @@ var tagKeywords = map[string][]string{
 	"config":     {"config", "env"},
 }
 
+// Site represents a single import site found in code.
 type Site struct {
 	File    string // path relative to scan root
 	Line    int    // 1-based
@@ -102,6 +88,7 @@ type Site struct {
 	IsTest  bool
 }
 
+// Usage captures all usage signals detected for a package in the codebase.
 type Usage struct {
 	Package     string
 	Sites       []Site
@@ -109,7 +96,7 @@ type Usage struct {
 	TestFiles   map[string]bool
 	Dirs        map[string]bool // top-level directories touched (prod files only)
 	Tags        map[string]bool // auth/db/routing/... seen in prod file paths
-	ConfigFiles map[string]bool // files where the package name appeared as a string, not a parsed import — weaker evidence, see containsWholeToken
+	ConfigFiles map[string]bool // files where the package name appeared as a string
 }
 
 func pkgFromSpecifier(spec string) (string, bool) {
@@ -131,21 +118,15 @@ func isTestPath(rel string) bool {
 	return strings.Contains(l, "test") || strings.Contains(l, "spec") || strings.Contains(l, "__mocks__")
 }
 
-// stripComments removes comments before either detection pass runs, so a
-// package name (or import) mentioned only in dead/commented-out code never
-// counts as real usage. It's a line-based heuristic, not a real parser —
-// consistent with the regex-based approach used everywhere else in this
-// file — so it won't handle every edge case (e.g. "//" or "/*" embedded in
-// a string literal), but it covers the common cases.
 func stripComments(name string, lines []string) []string {
 	lower := strings.ToLower(name)
 	switch {
 	case strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml"):
 		return stripYAMLComments(lines)
 	case strings.HasSuffix(lower, ".json"):
-		return lines // JSON has no comments
+		return lines
 	default:
-		return stripJSComments(lines) // .js/.ts family, plus extensionless dotfiles (.eslintrc, .babelrc)
+		return stripJSComments(lines)
 	}
 }
 
@@ -176,9 +157,6 @@ func stripJSComments(lines []string) []string {
 	return out
 }
 
-// stripSlashSlashComment cuts a line at "//", unless it's immediately
-// preceded by ":" — the common case of that being a URL (http://, https://)
-// inside a string rather than a real comment start.
 func stripSlashSlashComment(line string) string {
 	idx := strings.Index(line, "//")
 	for idx >= 0 {
@@ -211,10 +189,6 @@ func isIdentChar(b byte) bool {
 		('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z') || ('0' <= b && b <= '9')
 }
 
-// containsWholeToken reports whether name appears in line bounded by
-// non-identifier characters on both sides (quotes, brackets, commas,
-// whitespace, hyphens, slashes all count as boundaries) — so "jshint"
-// doesn't falsely match inside "jshint2" or "myjshint".
 func containsWholeToken(line, name string) bool {
 	if name == "" {
 		return false
@@ -275,25 +249,13 @@ func getOrCreateUsage(usage map[string]*Usage, pkg string) *Usage {
 	return u
 }
 
-// scanDir walks root and records usage of any package in `wanted` (direct
-// deps), via two passes per file:
-//
-//  1. A parsed import/require match (the strict, high-confidence signal).
-//  2. A plain name match, comment-stripped, across a broader file set that
-//     also includes config files (package.json, .eslintrc, etc.) — this
-//     catches packages a build tool loads by convention rather than a
-//     literal import statement (Grunt plugins named in a config object,
-//     ESLint/Babel plugins named in their config, CLI tools named in
-//     package.json's "scripts"). It's a weaker signal — a name match, not a
-//     verified import — so it's tracked separately in Usage.ConfigFiles
-//     rather than folded into ProdFiles/TestFiles.
 func scanDir(root string, wanted map[string]bool) (map[string]*Usage, int, error) {
 	usage := map[string]*Usage{}
 	scanned := 0
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // skip unreadable entries
+			return nil
 		}
 		if d.IsDir() {
 			if skipDirs[d.Name()] && path != root {
@@ -308,7 +270,7 @@ func scanDir(root string, wanted map[string]bool) (map[string]*Usage, int, error
 			return nil
 		}
 		if info, err := d.Info(); err != nil || info.Size() > 1<<20 {
-			return nil // skip huge files (usually bundles)
+			return nil
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -355,18 +317,11 @@ func scanDir(root string, wanted map[string]bool) (map[string]*Usage, int, error
 			}
 		}
 
-		// Secondary pass: does the bare package name show up anywhere in
-		// this file (comments already stripped), regardless of whether it
-		// was already matched as a real import above? A package can be
-		// both actually imported AND separately named in a config file.
-		// package.json's own dependency-listing fields are excluded first —
-		// every direct dep trivially appears there, which isn't evidence of
-		// anything.
 		configStripped := stripped
 		if d.Name() == "package.json" {
 			cleaned := packageJSONSearchText(data)
 			if cleaned == "" {
-				configStripped = nil // not valid JSON; don't risk false positives on raw text
+				configStripped = nil
 			} else {
 				configStripped = stripComments(d.Name(), strings.Split(cleaned, "\n"))
 			}
@@ -374,7 +329,7 @@ func scanDir(root string, wanted map[string]bool) (map[string]*Usage, int, error
 		for pkg := range wanted {
 			u := usage[pkg]
 			if u != nil && (u.ProdFiles[rel] || u.TestFiles[rel]) {
-				continue // already a real import in this exact file — don't also tag it as the weaker config-reference signal
+				continue
 			}
 			for _, line := range configStripped {
 				if containsWholeToken(line, pkg) {
@@ -388,8 +343,8 @@ func scanDir(root string, wanted map[string]bool) (map[string]*Usage, int, error
 	return usage, scanned, err
 }
 
-// sampleSites picks up to n sites, preferring production code and distinct files.
-func sampleSites(u *Usage, n int) []Site {
+// SampleSites picks up to n sites, preferring production code and distinct files.
+func SampleSites(u *Usage, n int) []Site {
 	sites := append([]Site(nil), u.Sites...)
 	sort.SliceStable(sites, func(i, j int) bool { return !sites[i].IsTest && sites[j].IsTest })
 	var out []Site
@@ -406,7 +361,8 @@ func sampleSites(u *Usage, n int) []Site {
 	return out
 }
 
-func sortedKeys(m map[string]bool) string {
+// SortedKeys returns comma-separated sorted keys of a map.
+func SortedKeys(m map[string]bool) string {
 	var k []string
 	for x := range m {
 		k = append(k, x)
@@ -415,10 +371,8 @@ func sortedKeys(m map[string]bool) string {
 	return strings.Join(k, ",")
 }
 
-// sortedFileList is sortedKeys but returns the slice instead of a joined
-// string, for callers that want to render file names individually (e.g. in
-// an HTML list) rather than as one comma-separated blob.
-func sortedFileList(m map[string]bool) []string {
+// SortedFileList returns sorted keys of a map as a slice of strings.
+func SortedFileList(m map[string]bool) []string {
 	var k []string
 	for x := range m {
 		k = append(k, x)
@@ -427,8 +381,7 @@ func sortedFileList(m map[string]bool) []string {
 	return k
 }
 
-// UsageScan is the structured result of runScan, for callers (the HTML
-// report) that want to render it themselves instead of using the text form.
+// UsageScan is the structured result of RunScan.
 type UsageScan struct {
 	Rows    []*Usage // sorted by prod-file count, descending
 	Unused  []string // direct deps never imported in source
@@ -436,11 +389,8 @@ type UsageScan struct {
 	Root    string
 }
 
-// runScan builds the usage report as text and returns both the text (for the
-// model/terminal) and the structured data behind it (for the HTML report).
-// print controls whether it's also echoed to stdout — the CLI wants that,
-// the interactive agent shows its own animated status instead.
-func runScan(g *Graph, root, show string, print bool) (string, UsageScan) {
+// RunScan builds the usage report as text and returns both the text and structured data.
+func RunScan(g *Graph, root, show string, print bool) (string, UsageScan) {
 	wanted := map[string]bool{}
 	for _, n := range g.Nodes {
 		if n.Direct {
@@ -471,7 +421,7 @@ func runScan(g *Graph, root, show string, print bool) (string, UsageScan) {
 	fmt.Fprintf(&b, "%-32s %-10s %-10s %-11s %-6s %-6s %s\n", "PACKAGE", "PROD_FILES", "TEST_FILES", "CONFIG_REFS", "DIRS", "SITES", "TAGS")
 	for _, u := range rows {
 		fmt.Fprintf(&b, "%-32s %-10d %-10d %-11d %-6d %-6d %s\n",
-			trunc(u.Package, 32), len(u.ProdFiles), len(u.TestFiles), len(u.ConfigFiles), len(u.Dirs), len(u.Sites), sortedKeys(u.Tags))
+			Trunc(u.Package, 32), len(u.ProdFiles), len(u.TestFiles), len(u.ConfigFiles), len(u.Dirs), len(u.Sites), SortedKeys(u.Tags))
 	}
 	fmt.Fprintf(&b, "\nCONFIG_REFS: the package name was found as a plain string in a config file "+
 		"(package.json, .eslintrc, etc.), not a parsed import — weaker evidence than PROD_FILES/TEST_FILES, "+
@@ -494,7 +444,7 @@ func runScan(g *Graph, root, show string, print bool) (string, UsageScan) {
 			fmt.Fprintf(&b, "\nNo usage found for %q\n", show)
 		} else {
 			fmt.Fprintf(&b, "\n=== sampled usage of %s ===\n", show)
-			for _, s := range sampleSites(u, 8) {
+			for _, s := range SampleSites(u, 8) {
 				fmt.Fprintf(&b, "\n%s:%d\n%s", s.File, s.Line, s.Snippet)
 			}
 		}
@@ -506,21 +456,96 @@ func runScan(g *Graph, root, show string, print bool) (string, UsageScan) {
 	return b.String(), UsageScan{Rows: rows, Unused: unused, Scanned: scanned, Root: root}
 }
 
-// cloneRepo shallow-clones github.com/<repo> into a temp dir (needs git installed).
-func cloneRepo(repo, ref string) (string, func(), error) {
-	tmp, err := os.MkdirTemp("", "atlas-*")
-	if err != nil {
-		return "", nil, err
+// Classification constants for dependency usage
+const (
+	ClassRuntime          = "runtime"
+	ClassTestOnly         = "test-only"
+	ClassConfigReferenced = "config-referenced"
+	ClassBuildTooling     = "build-tooling"
+	ClassUnusedCandidate  = "unused-candidate"
+	ClassNotScanned       = "not-scanned"
+)
+
+// ClassifyUsage deterministically categorizes how a dependency is used.
+func ClassifyUsage(scanned, isDev bool, u *Usage) string {
+	if !scanned {
+		return ClassNotScanned
 	}
-	cleanup := func() { os.RemoveAll(tmp) }
-	args := []string{"clone", "--depth", "1"}
-	if ref != "" {
-		args = append(args, "--branch", ref)
+	switch {
+	case u != nil && len(u.ProdFiles) > 0:
+		return ClassRuntime
+	case u != nil && len(u.TestFiles) > 0:
+		return ClassTestOnly
+	case u != nil && len(u.ConfigFiles) > 0:
+		return ClassConfigReferenced
+	case isDev:
+		return ClassBuildTooling
+	default:
+		return ClassUnusedCandidate
 	}
-	args = append(args, "https://github.com/"+repo+".git", tmp)
-	if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("git clone failed: %v\n%s", err, out)
+}
+
+const maxUsageFilesListed = 8
+
+// ListFiles renders up to maxUsageFilesListed file names, or count only.
+func ListFiles(files []string) string {
+	if len(files) > maxUsageFilesListed {
+		return strconv.Itoa(len(files)) + " files"
 	}
-	return tmp, cleanup, nil
+	return strings.Join(files, ", ")
+}
+
+// UsageDetailMarkdown renders every file that references a package, grouped
+// by evidence tier, with no truncation — unlike UsageSummary/ListFiles (which
+// collapse to a count past maxUsageFilesListed for compact table display),
+// this is meant for a GitHub issue body where naming the exact files matters
+// more than staying short.
+func UsageDetailMarkdown(u *Usage) string {
+	if u == nil {
+		return "Not imported anywhere in the scanned source — no usage evidence found."
+	}
+	var sb strings.Builder
+	section := func(label string, files map[string]bool) {
+		if len(files) == 0 {
+			return
+		}
+		list := SortedFileList(files)
+		sb.WriteString(fmt.Sprintf("**%s (%d):**\n", label, len(list)))
+		for _, f := range list {
+			sb.WriteString("- `" + f + "`\n")
+		}
+		sb.WriteString("\n")
+	}
+	section("Production files", u.ProdFiles)
+	section("Test files", u.TestFiles)
+	section("Config references", u.ConfigFiles)
+	if sb.Len() == 0 {
+		return "No usage evidence found in the scanned source (no import, no config reference)."
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// UsageSummary renders how deeply a package is actually used in this project.
+func UsageSummary(u *Usage) string {
+	if u == nil {
+		return "not imported in source"
+	}
+	var parts []string
+	if len(u.ProdFiles) > 0 {
+		parts = append(parts, "prod: "+ListFiles(SortedFileList(u.ProdFiles)))
+	}
+	if len(u.TestFiles) > 0 {
+		parts = append(parts, "test: "+ListFiles(SortedFileList(u.TestFiles)))
+	}
+	if len(u.ConfigFiles) > 0 {
+		parts = append(parts, "config-referenced: "+ListFiles(SortedFileList(u.ConfigFiles)))
+	}
+	if len(parts) == 0 {
+		return "not imported in source"
+	}
+	s := strings.Join(parts, "; ")
+	if tags := SortedKeys(u.Tags); tags != "" {
+		s += " (" + tags + ")"
+	}
+	return s
 }
