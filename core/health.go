@@ -1,4 +1,4 @@
-package main
+package core
 
 // Step 3: dependency health signals, no AI — just three free APIs plus one
 // metric we compute ourselves (bus factor).
@@ -28,7 +28,8 @@ import (
 
 // ---------- shared HTTP ----------
 
-func httpGet(u string, headers map[string]string) ([]byte, int, error) {
+// HttpGet executes a GET request and returns body, status code, and error.
+func HttpGet(u string, headers map[string]string) ([]byte, int, error) {
 	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		return nil, 0, err
@@ -46,7 +47,8 @@ func httpGet(u string, headers map[string]string) ([]byte, int, error) {
 	return body, resp.StatusCode, err
 }
 
-func githubHeaders() map[string]string {
+// GithubHeaders returns default headers with GITHUB_TOKEN if available.
+func GithubHeaders() map[string]string {
 	h := map[string]string{"Accept": "application/vnd.github+json"}
 	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
 		h["Authorization"] = "Bearer " + tok
@@ -61,18 +63,11 @@ func githubRateLimitErr(status int) error {
 // ---------- npm registry ----------
 
 type npmPackument struct {
-	// Maintainers is npm's publish-access list for this package — accounts
-	// allowed to push new versions — NOT a measure of who writes code. A
-	// solo maintainer with a huge, active GitHub contributor base (see
-	// ContributorCount) is a very different risk than a solo maintainer with
-	// neither contributors nor adoption; this field alone can't tell them
-	// apart, which is why it's paired with ContributorCount and
-	// WeeklyDownloads rather than read on its own.
 	Maintainers []struct {
 		Name  string `json:"name"`
 		Email string `json:"email"`
 	} `json:"maintainers"`
-	Time       map[string]string `json:"time"` // version -> ISO8601; also "created"/"modified"
+	Time       map[string]string `json:"time"`
 	Repository struct {
 		Type string `json:"type"`
 		URL  string `json:"url"`
@@ -81,7 +76,7 @@ type npmPackument struct {
 
 func fetchNpmPackument(name string) (*npmPackument, error) {
 	u := "https://registry.npmjs.org/" + url.PathEscape(name)
-	body, status, err := httpGet(u, nil)
+	body, status, err := HttpGet(u, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -95,14 +90,9 @@ func fetchNpmPackument(name string) (*npmPackument, error) {
 	return &pj, nil
 }
 
-// fetchNpmDownloads returns weekly download count from npm's public download
-// counts API — a rough proxy for "how much replacement pressure exists if
-// the maintainer disappears." A widely-downloaded package under-resourced on
-// maintenance tends to get picked up by someone else (forks, new maintainers
-// stepping in); an unpopular one usually doesn't.
 func fetchNpmDownloads(name string) (int, error) {
 	u := "https://api.npmjs.org/downloads/point/last-week/" + url.PathEscape(name)
-	body, status, err := httpGet(u, nil)
+	body, status, err := HttpGet(u, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -118,8 +108,6 @@ func fetchNpmDownloads(name string) (int, error) {
 	return d.Downloads, nil
 }
 
-// npmPublishStats derives last-publish time, mean days between the most
-// recent releases, and maintainer count from a packument.
 func npmPublishStats(pj *npmPackument) (last time.Time, cadenceDays float64, maintainers int) {
 	maintainers = len(pj.Maintainers)
 
@@ -153,8 +141,6 @@ func npmPublishStats(pj *npmPackument) (last time.Time, cadenceDays float64, mai
 	return
 }
 
-// resolveGithubRepo pulls owner/repo out of a packument's repository.url,
-// handling the common forms npm packages use.
 func resolveGithubRepo(pj *npmPackument) (owner, repo string, ok bool) {
 	raw := pj.Repository.URL
 	if raw == "" {
@@ -181,17 +167,17 @@ func resolveGithubRepo(pj *npmPackument) (owner, repo string, ok bool) {
 	return parts[0], parts[1], true
 }
 
-// ---------- GitHub ----------
+// ---------- GitHub REST API ----------
 
-type ghRepo struct {
+type githubRepoResponse struct {
 	Archived   bool   `json:"archived"`
-	OpenIssues int    `json:"open_issues_count"`
 	PushedAt   string `json:"pushed_at"`
+	OpenIssues int    `json:"open_issues_count"`
 }
 
-func fetchGithubRepo(owner, repo string) (*ghRepo, error) {
+func fetchGithubRepo(owner, repo string) (*githubRepoResponse, error) {
 	u := fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo)
-	body, status, err := httpGet(u, githubHeaders())
+	body, status, err := HttpGet(u, GithubHeaders())
 	if err != nil {
 		return nil, err
 	}
@@ -199,39 +185,21 @@ func fetchGithubRepo(owner, repo string) (*ghRepo, error) {
 		return nil, githubRateLimitErr(status)
 	}
 	if status != 200 {
-		return nil, fmt.Errorf("github repo: %s", http.StatusText(status))
+		return nil, fmt.Errorf("github repo %s/%s: %s", owner, repo, http.StatusText(status))
 	}
-	var r ghRepo
+	var r githubRepoResponse
 	if err := json.Unmarshal(body, &r); err != nil {
 		return nil, fmt.Errorf("parse github repo: %w", err)
 	}
 	return &r, nil
 }
 
-type ghContributorStats struct {
-	Author struct {
-		Login string `json:"login"`
-	} `json:"author"`
-	Weeks []struct {
-		W int64 `json:"w"` // unix timestamp, start of week
-		C int   `json:"c"` // commits that week
-	} `json:"weeks"`
-}
-
-// paginatedCount returns the true total item count for a paginated GitHub
-// list endpoint by requesting one item per page and reading the page number
-// out of the "last" rel in the Link header — avoids walking every page just
-// to count them. If there's no Link header, everything fit on one page.
-//
-// This matters because several GitHub endpoints (notably stats/contributors)
-// silently cap out around 100 results with no further pages exposed at all;
-// the real count has to come from a genuinely paginated endpoint instead.
 func paginatedCount(u string) (int, error) {
 	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		return 0, err
 	}
-	for k, v := range githubHeaders() {
+	for k, v := range GithubHeaders() {
 		req.Header.Set(k, v)
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -240,107 +208,121 @@ func paginatedCount(u string) (int, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, err
-	}
 	if resp.StatusCode == 403 || resp.StatusCode == 429 {
 		return 0, githubRateLimitErr(resp.StatusCode)
 	}
 	if resp.StatusCode != 200 {
-		return 0, fmt.Errorf("%s: %s", u, http.StatusText(resp.StatusCode))
+		return 0, fmt.Errorf("github count: %s", http.StatusText(resp.StatusCode))
 	}
-	if last := lastPageFromLink(resp.Header.Get("Link")); last > 0 {
-		return last, nil // per_page=1, so the last page number equals the total count
+	link := resp.Header.Get("Link")
+	if link == "" {
+		body, _ := io.ReadAll(resp.Body)
+		var arr []any
+		if err := json.Unmarshal(body, &arr); err != nil {
+			return 0, err
+		}
+		return len(arr), nil
 	}
-	var arr []json.RawMessage
-	if err := json.Unmarshal(body, &arr); err != nil {
-		return 0, err
-	}
-	return len(arr), nil
+	return parseLastPage(link)
 }
 
-func lastPageFromLink(link string) int {
-	for _, part := range strings.Split(link, ",") {
-		if !strings.Contains(part, `rel="last"`) {
-			continue
-		}
-		start, end := strings.Index(part, "<"), strings.Index(part, ">")
-		if start < 0 || end < 0 || end <= start {
-			continue
-		}
-		parsed, err := url.Parse(part[start+1 : end])
-		if err != nil {
-			continue
-		}
-		if n, err := strconv.Atoi(parsed.Query().Get("page")); err == nil {
-			return n
+func parseLastPage(linkHeader string) (int, error) {
+	for _, part := range strings.Split(linkHeader, ",") {
+		section := strings.TrimSpace(part)
+		if strings.Contains(section, `rel="last"`) {
+			start := strings.Index(section, "<")
+			end := strings.Index(section, ">")
+			if start >= 0 && end > start {
+				targetURL := section[start+1 : end]
+				parsed, err := url.Parse(targetURL)
+				if err != nil {
+					return 0, err
+				}
+				p := parsed.Query().Get("page")
+				if p == "" {
+					return 0, fmt.Errorf("no page param in last link")
+				}
+				n, err := strconv.Atoi(p)
+				if err != nil {
+					return 0, err
+				}
+				return n, nil
+			}
 		}
 	}
-	return 0
+	return 0, fmt.Errorf("no rel=last found in link header")
 }
 
-// fetchGithubContributorStats can 202 while GitHub computes stats in the
-// background; we retry with a growing backoff and otherwise give up rather
-// than block the run. Note: this endpoint is used only for the weekly commit
-// breakdown bus factor needs — it is NOT a reliable total contributor count
-// (see paginatedCount above), since it caps out well short of the real number
-// on busy repos.
-func fetchGithubContributorStats(owner, repo string) ([]ghContributorStats, error) {
+type contributorWeek struct {
+	Week int `json:"w"`
+	Commits int `json:"c"`
+}
+
+type contributorStat struct {
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	Total int `json:"total"`
+	Weeks []contributorWeek `json:"weeks"`
+}
+
+func fetchGithubContributorStats(owner, repo string) ([]contributorStat, error) {
 	u := fmt.Sprintf("https://api.github.com/repos/%s/%s/stats/contributors", owner, repo)
-	const maxAttempts = 4
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		body, status, err := httpGet(u, githubHeaders())
+	for attempt := 0; attempt < 4; attempt++ {
+		body, status, err := HttpGet(u, GithubHeaders())
 		if err != nil {
 			return nil, err
 		}
-		switch status {
-		case 200:
-			var stats []ghContributorStats
-			if err := json.Unmarshal(body, &stats); err != nil {
-				return nil, fmt.Errorf("parse contributor stats: %w", err)
-			}
-			return stats, nil
-		case 202:
-			time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
+		if status == 202 {
+			time.Sleep(1 * time.Second)
 			continue
-		case 403, 429:
-			return nil, githubRateLimitErr(status)
-		default:
-			return nil, fmt.Errorf("github contributor stats: %s", http.StatusText(status))
 		}
+		if status == 403 || status == 429 {
+			return nil, githubRateLimitErr(status)
+		}
+		if status != 200 {
+			return nil, fmt.Errorf("github stats/contributors: %s", http.StatusText(status))
+		}
+		var stats []contributorStat
+		if err := json.Unmarshal(body, &stats); err != nil {
+			return nil, fmt.Errorf("parse contributor stats: %w", err)
+		}
+		return stats, nil
 	}
-	return nil, fmt.Errorf("contributor stats not ready yet, try again shortly")
+	return nil, fmt.Errorf("github stats/contributors still computing (202) after retries")
 }
 
-// computeBusFactor sums each contributor's commits over the trailing 12
-// months and returns the top contributor's share of that total.
-func computeBusFactor(stats []ghContributorStats, now time.Time) (topLogin string, share float64) {
-	cutoff := now.AddDate(-1, 0, 0).Unix()
-	totals := map[string]int{}
-	all := 0
+func computeBusFactor(stats []contributorStat, now time.Time) (topContributor string, share float64) {
+	oneYearAgo := now.AddDate(-1, 0, 0).Unix()
+	var totals []struct {
+		login string
+		c     int
+	}
+	grandTotal := 0
 	for _, s := range stats {
-		if s.Author.Login == "" {
-			continue
-		}
-		sum := 0
+		c := 0
 		for _, w := range s.Weeks {
-			if w.W >= cutoff {
-				sum += w.C
+			if int64(w.Week) >= oneYearAgo {
+				c += w.Commits
 			}
 		}
-		totals[s.Author.Login] += sum
-		all += sum
-	}
-	for login, c := range totals {
-		if c > totals[topLogin] {
-			topLogin = login
+		if c > 0 {
+			login := s.Author.Login
+			if login == "" {
+				login = "(anon)"
+			}
+			totals = append(totals, struct {
+				login string
+				c     int
+			}{login, c})
+			grandTotal += c
 		}
 	}
-	if all > 0 {
-		share = float64(totals[topLogin]) / float64(all)
+	if grandTotal == 0 {
+		return "", 0
 	}
-	return
+	sort.Slice(totals, func(i, j int) bool { return totals[i].c > totals[j].c })
+	return totals[0].login, float64(totals[0].c) / float64(grandTotal)
 }
 
 // ---------- OSV.dev ----------
@@ -357,7 +339,7 @@ type osvVulnDetail struct {
 	Summary          string `json:"summary"`
 	Published        string `json:"published"`
 	DatabaseSpecific struct {
-		Severity string `json:"severity"` // "LOW"/"MODERATE"/"HIGH"/"CRITICAL", empty if OSV hasn't classified it
+		Severity string `json:"severity"`
 	} `json:"database_specific"`
 	Affected []struct {
 		Ranges []struct {
@@ -369,9 +351,6 @@ type osvVulnDetail struct {
 	} `json:"affected"`
 }
 
-// fixedVersions pulls every "fixed" version OSV lists across this vuln's
-// affected ranges (there can be more than one, e.g. a backport on an older
-// major line as well as the current one).
 func fixedVersions(d *osvVulnDetail) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -390,7 +369,7 @@ func fixedVersions(d *osvVulnDetail) []string {
 }
 
 func fetchOsvVulnDetail(id string) (*osvVulnDetail, error) {
-	body, status, err := httpGet("https://api.osv.dev/v1/vulns/"+url.PathEscape(id), nil)
+	body, status, err := HttpGet("https://api.osv.dev/v1/vulns/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -404,14 +383,6 @@ func fetchOsvVulnDetail(id string) (*osvVulnDetail, error) {
 	return &d, nil
 }
 
-// osvBatchQueryChunk asks OSV's batch endpoint which packages have known
-// vulnerabilities. Critically, it sends the exact installed version for each
-// package — without it, OSV returns every vulnerability ever filed against
-// that package name, including ones for versions you don't have and ones
-// already patched in the version you do have. With a version, OSV itself
-// filters to only the advisories whose affected ranges actually cover it.
-// The batch endpoint intentionally returns only IDs (no summary/published)
-// to keep responses small.
 func osvBatchQueryChunk(targets []*Node) (map[string][]string, error) {
 	type query struct {
 		Package struct {
@@ -465,10 +436,6 @@ func osvBatchQueryChunk(targets []*Node) (map[string][]string, error) {
 	return out, nil
 }
 
-// osvBatchQuery resolves advisory IDs — filtered to the installed version of
-// each package — in one (or a few, chunked) batch calls, then fetches full
-// details (including fixed-in versions) only for the distinct vuln IDs that
-// actually came back; most packages have none.
 func osvBatchQuery(targets []*Node) (map[string][]Advisory, error) {
 	idsByPkg := map[string][]string{}
 	const chunkSize = 1000
@@ -494,7 +461,7 @@ func osvBatchQuery(targets []*Node) (map[string][]Advisory, error) {
 			}
 			d, err := fetchOsvVulnDetail(id)
 			if err != nil {
-				d = &osvVulnDetail{} // keep the ID even if detail fetch fails
+				d = &osvVulnDetail{}
 			}
 			details[id] = d
 		}
@@ -516,39 +483,38 @@ func osvBatchQuery(targets []*Node) (map[string][]Advisory, error) {
 
 // ---------- orchestration ----------
 
+// Advisory represents an OSV security advisory against a package version.
 type Advisory struct {
 	ID        string
 	Summary   string
-	Severity  string // "LOW"/"MODERATE"/"HIGH"/"CRITICAL" per OSV, empty if unclassified
+	Severity  string // "LOW"/"MODERATE"/"HIGH"/"CRITICAL"
 	Published time.Time
-	FixedIn   []string // versions OSV lists as fixed; empty if no fix is published yet
+	FixedIn   []string
 }
 
+// Health represents the health signals retrieved for a dependency.
 type Health struct {
 	Package            string
 	Version            string
-	Dev                bool // from the lockfile's own "dev" flag — ground truth, not inferred
-	MaintainerCount    int  // npm publish-access count, not code contributors — see npmPackument.Maintainers
+	Dev                bool
+	MaintainerCount    int
 	LastPublish        time.Time
-	PublishCadenceDays float64 // mean days between the last ~10 releases
-	WeeklyDownloads    int     // npm weekly downloads — proxy for replacement pressure if maintenance stalls
+	PublishCadenceDays float64
+	WeeklyDownloads    int
 
-	GithubRepo       string // "owner/repo", empty if unresolved
+	GithubRepo       string
 	LastCommit       time.Time
-	ContributorCount int // via anon=1 (see fetchHealth); can overcount contributors who used multiple unlinked emails
+	ContributorCount int
 	Archived         bool
-	OpenIssues       int // issues only; GitHub's own open_issues_count also counts open PRs
+	OpenIssues       int
 	TopContributor   string
-	BusFactor        float64 // top contributor's share of commits, trailing 12mo, [0,1]
+	BusFactor        float64
 
 	Advisories []Advisory
-	Notes      []string // best-effort notes; not all of them make the package unevaluable — see Material
-	Material   bool     // true only if a failure prevented evaluating the package's core risk (npm/GitHub lookup), not a secondary signal
+	Notes      []string
+	Material   bool
 }
 
-// healthTargets picks direct dependencies (one Node per distinct package
-// name) plus, if topN > 0, the next topN packages by blast radius that
-// aren't already covered.
 func healthTargets(g *Graph, topN int) []*Node {
 	seen := map[string]bool{}
 	var targets []*Node
@@ -595,8 +561,8 @@ func fetchHealth(n *Node, advisories []Advisory) *Health {
 
 	pj, err := fetchNpmPackument(n.Name)
 	if err != nil {
-		h.Notes = append(h.Notes, err.Error()) // fetchNpmPackument's error already says "npm registry: ..."
-		h.Material = true                      // no package metadata at all: can't evaluate this one
+		h.Notes = append(h.Notes, err.Error())
+		h.Material = true
 		return h
 	}
 	h.LastPublish, h.PublishCadenceDays, h.MaintainerCount = npmPublishStats(pj)
@@ -616,34 +582,25 @@ func fetchHealth(n *Node, advisories []Advisory) *Health {
 
 	if r, err := fetchGithubRepo(owner, repo); err != nil {
 		h.Notes = append(h.Notes, "github repo: "+err.Error())
-		h.Material = true // GitHub API unreachable/rate-limited: archived + abandonment signals are unavailable
+		h.Material = true
 	} else {
 		h.Archived = r.Archived
 		if t, err := time.Parse(time.RFC3339, r.PushedAt); err == nil {
 			h.LastCommit = t
 		}
 
-		// open_issues_count counts open PRs as issues (a long-standing
-		// GitHub API quirk) — subtract the real open-PR total to get an
-		// issues-only number that matches what the Issues tab shows.
 		openPRs, err := paginatedCount(fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls?state=open&per_page=1", owner, repo))
 		if err != nil {
 			h.Notes = append(h.Notes, "open PR count: "+err.Error())
-			h.OpenIssues = r.OpenIssues // fall back to the combined issues+PRs figure
+			h.OpenIssues = r.OpenIssues
 		} else {
 			h.OpenIssues = r.OpenIssues - openPRs
 			if h.OpenIssues < 0 {
-				h.OpenIssues = 0 // counts can drift between the two live calls
+				h.OpenIssues = 0
 			}
 		}
 	}
 
-	// anon=1 includes commits from emails not linked to a GitHub account.
-	// This can overcount (GitHub dedupes anonymous entries by commit email,
-	// not by person, so one contributor using several unlinked emails over
-	// the years shows up more than once) but it never undercounts the way
-	// the non-anon list does for repos with lots of legacy/unlinked commits,
-	// and it isn't subject to the 500-entry cap stats/contributors hits.
 	if count, err := paginatedCount(fmt.Sprintf("https://api.github.com/repos/%s/%s/contributors?per_page=1&anon=1", owner, repo)); err != nil {
 		h.Notes = append(h.Notes, "contributor count: "+err.Error())
 	} else {
@@ -658,9 +615,8 @@ func fetchHealth(n *Node, advisories []Advisory) *Health {
 	return h
 }
 
-// runHealth fetches health signals for direct deps (plus optional top-N by
-// blast radius) concurrently, bounded so we don't hammer GitHub's rate limit.
-func runHealth(g *Graph, topN int) []*Health {
+// RunHealth fetches health signals for dependencies concurrently.
+func RunHealth(g *Graph, topN int) []*Health {
 	targets := healthTargets(g, topN)
 
 	advisories, err := osvBatchQuery(targets)
@@ -686,26 +642,24 @@ func runHealth(g *Graph, topN int) []*Health {
 	return rows
 }
 
-// ---------- output ----------
-
-func dateOrDash(t time.Time) string {
+// DateOrDash returns formatted date or dash if zero time.
+func DateOrDash(t time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
 	return t.Format("2006-01-02")
 }
 
-func busFactorStr(h *Health) string {
+// BusFactorStr returns formatted bus factor percentage.
+func BusFactorStr(h *Health) string {
 	if h.TopContributor == "" {
 		return "-"
 	}
 	return strconv.Itoa(int(h.BusFactor*100)) + "%"
 }
 
-// formatCount abbreviates large counts (downloads, etc.) for table display.
-// The underlying Health field always keeps the exact int — this is a
-// display-only helper.
-func formatCount(n int) string {
+// FormatCount abbreviates numbers for display (e.g. 1.2M, 50K).
+func FormatCount(n int) string {
 	switch {
 	case n >= 1_000_000:
 		return strconv.FormatFloat(float64(n)/1_000_000, 'f', 1, 64) + "M"
@@ -716,10 +670,8 @@ func formatCount(n int) string {
 	}
 }
 
-// advisoryItems formats each advisory alongside OSV's "fixed in" version(s) —
-// since the query was scoped to the installed version (osvBatchQueryChunk),
-// every advisory listed here already applies to what's actually installed.
-func advisoryItems(h *Health) []string {
+// AdvisoryItems formats advisories into display strings.
+func AdvisoryItems(h *Health) []string {
 	if len(h.Advisories) == 0 {
 		return nil
 	}
@@ -738,24 +690,17 @@ func advisoryItems(h *Health) []string {
 	return parts
 }
 
-// advisoryStr joins advisoryItems for single-line display (terminal table).
-func advisoryStr(h *Health) string {
-	items := advisoryItems(h)
+// AdvisoryStr joins advisory items into a single string.
+func AdvisoryStr(h *Health) string {
+	items := AdvisoryItems(h)
 	if len(items) == 0 {
 		return "-"
 	}
 	return strings.Join(items, ", ")
 }
 
-// splitHealthProblems separates packages Atlas could actually evaluate from
-// ones it fundamentally couldn't. Only a Material failure (npm registry
-// lookup or GitHub repo fetch) puts a package here — those leave no reliable
-// core signal to score on. Secondary signals (weekly downloads, contributor
-// count, bus factor, open-PR count, or simply having no GitHub repo) can fail
-// transiently or be irrelevant without making the package unevaluable:
-// its advisories, archived flag, and usage class are still valid, so it stays
-// in `clean` and keeps contributing to the score.
-func splitHealthProblems(rows []*Health) (clean, problems []*Health) {
+// SplitHealthProblems separates clean evaluated records from material failures.
+func SplitHealthProblems(rows []*Health) (clean, problems []*Health) {
 	for _, h := range rows {
 		if h.Material {
 			problems = append(problems, h)
@@ -766,18 +711,17 @@ func splitHealthProblems(rows []*Health) (clean, problems []*Health) {
 	return clean, problems
 }
 
-// printHealth builds the report text, prints it, and returns it (so callers
-// like the interactive agent can also fold it into a saved report).
-func printHealth(rows []*Health) string {
+// PrintHealth renders the table of health signals to stdout and returns the string.
+func PrintHealth(rows []*Health) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n%-24s %-10s %-8s %-12s %-12s %-6s %-9s %-5s %-7s %s\n",
 		"PACKAGE", "VERSION", "DL/WK", "LAST PUBLISH", "LAST COMMIT", "CONTR", "BUSFACTOR", "ARCH", "ISSUES", "ADVISORIES")
 	for _, h := range rows {
 		fmt.Fprintf(&b, "%-24s %-10s %-8s %-12s %-12s %-6d %-9s %-5v %-7d %s\n",
-			trunc(h.Package, 24), trunc(h.Version, 10), formatCount(h.WeeklyDownloads),
-			dateOrDash(h.LastPublish),
-			dateOrDash(h.LastCommit), h.ContributorCount,
-			busFactorStr(h), h.Archived, h.OpenIssues, advisoryStr(h))
+			Trunc(h.Package, 24), Trunc(h.Version, 10), FormatCount(h.WeeklyDownloads),
+			DateOrDash(h.LastPublish),
+			DateOrDash(h.LastCommit), h.ContributorCount,
+			BusFactorStr(h), h.Archived, h.OpenIssues, AdvisoryStr(h))
 	}
 	for _, h := range rows {
 		for _, note := range h.Notes {
@@ -795,7 +739,8 @@ func printHealth(rows []*Health) string {
 	return b.String()
 }
 
-func writeHealthJSON(rows []*Health, path string) error {
+// WriteHealthJSON saves health records as JSON.
+func WriteHealthJSON(rows []*Health, path string) error {
 	b, err := json.MarshalIndent(rows, "", "  ")
 	if err != nil {
 		return err

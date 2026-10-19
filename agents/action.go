@@ -1,21 +1,9 @@
-package main
-
-// GitHub Issue Agent — creates structured GitHub issues for dependency
-// vulnerabilities and risks found by Atlas's health and usage pipeline.
-//
-// Design:
-//   - Two-phase: suggest_github_issues (preview + model asks user) then
-//     create_github_issues (creates only after explicit user confirmation).
-//   - Issues are fully self-contained: problem description, affected files
-//     (from the usage scan), blast-radius metrics (from the graph), and a
-//     proposed remediation.
-//   - Deduplication: before creating, Atlas searches the target repo's
-//     existing issues for a matching atlas:pkg + atlas:advisory fingerprint
-//     embedded as an HTML comment, so calling create twice is safe.
-//   - build-tooling and unused-candidate packages are never filed — too noisy.
+package agents
 
 import (
+	"atlas/core"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -26,50 +14,39 @@ import (
 	"time"
 )
 
-// ---------- risk classification ----------
-
-// IssueSeverity is the triage level Atlas assigns to a filing candidate,
-// blending OSV severity with usage classification so a CRITICAL advisory in
-// a test-only package doesn't outrank a MODERATE one wired into production.
-type IssueSeverity string
-
-const (
-	SeverityCritical IssueSeverity = "CRITICAL"
-	SeverityHigh     IssueSeverity = "HIGH"
-	SeverityModerate IssueSeverity = "MODERATE"
-	SeverityLow      IssueSeverity = "LOW"
-)
-
-// IssueableRisk is one actionable finding: either a specific advisory on a
-// package, or a structural risk (archived, abandonment) without an advisory.
-type IssueableRisk struct {
-	Package        string
-	Version        string
-	Classification string       // one of the Class* constants from report.go
-	Advisory       *Advisory    // nil for structural risks (archived, abandonment)
-	Health         *Health      // full health record — bus factor, contributor count, etc.
-	Usage          *Usage       // nil if usage scan didn't run
-	UsedIn         string       // pre-rendered from usageSummary()
-	BlastRadius    int          // Node.TransitiveDependents
-	RiskType       string       // "advisory" | "archived" | "abandonment"
-	EffectiveSev   IssueSeverity // blended: considers usage class
+// ActionAgent is the downstream agent that manages GitHub issue preview, dedup, and creation.
+type ActionAgent struct {
+	limiter *ConcurrencyLimiter
 }
 
-// ---------- triage ----------
+// NewActionAgent creates an Action Agent.
+func NewActionAgent(limiter *ConcurrencyLimiter) *ActionAgent {
+	if limiter == nil {
+		limiter = NewConcurrencyLimiter(2) // polite rate limit for GitHub API
+	}
+	return &ActionAgent{
+		limiter: limiter,
+	}
+}
 
-// blendSeverity downgrades the raw OSV severity based on usage class —
-// a CRITICAL advisory in a test-only package is a real finding but much less
-// urgent than the same advisory in production code.
+func (a *ActionAgent) Name() string {
+	return "GitHub Issue Action Agent"
+}
+
+func (a *ActionAgent) Description() string {
+	return "Triages dependency findings into structured GitHub issues, verifies duplicates concurrently, and dispatches issues with rate limiting."
+}
+
+// blendSeverity downgrades raw OSV severity for test-only dependencies.
 func blendSeverity(rawSev string, class string) IssueSeverity {
 	sev := IssueSeverity(rawSev)
 	if sev == "" {
-		sev = SeverityLow // UNRATED treated as LOW for triage
+		sev = SeverityLow
 	}
 	switch class {
-	case ClassRuntime, ClassConfigReferenced:
-		return sev // no downgrade for production usage
-	case ClassTestOnly:
-		// downgrade one step for test-only
+	case core.ClassRuntime, core.ClassConfigReferenced:
+		return sev
+	case core.ClassTestOnly:
 		switch sev {
 		case SeverityCritical:
 			return SeverityHigh
@@ -79,19 +56,13 @@ func blendSeverity(rawSev string, class string) IssueSeverity {
 			return SeverityLow
 		}
 	default:
-		// build-tooling / unused-candidate: never filed, but return LOW for completeness
 		return SeverityLow
 	}
 }
 
-// shouldFile returns true if a risk is worth opening a GitHub issue for.
-// Build-tooling and unused-candidate packages are excluded — too noisy and
-// too likely to be false positives. Advisory threshold is MODERATE for
-// runtime, HIGH for test-only (filing a MODERATE issue on a test package
-// would drown out real signal).
 func shouldFile(r IssueableRisk) bool {
 	switch r.Classification {
-	case ClassBuildTooling, ClassUnusedCandidate, ClassNotScanned:
+	case core.ClassBuildTooling, core.ClassUnusedCandidate, core.ClassNotScanned:
 		return false
 	}
 
@@ -101,27 +72,22 @@ func shouldFile(r IssueableRisk) bool {
 		case SeverityCritical, SeverityHigh:
 			return true
 		case SeverityModerate:
-			return r.Classification == ClassRuntime || r.Classification == ClassConfigReferenced
+			return r.Classification == core.ClassRuntime || r.Classification == core.ClassConfigReferenced
 		default:
 			return false
 		}
 	case "archived":
-		// Archived repo used in production: always file.
-		return r.Classification == ClassRuntime || r.Classification == ClassConfigReferenced
+		return r.Classification == core.ClassRuntime || r.Classification == core.ClassConfigReferenced
 	case "abandonment":
-		// Only file if blast radius is significant and it's production-facing.
 		return r.BlastRadius >= 3 &&
-			(r.Classification == ClassRuntime || r.Classification == ClassConfigReferenced)
+			(r.Classification == core.ClassRuntime || r.Classification == core.ClassConfigReferenced)
 	}
 	return false
 }
 
-// collectRisks walks the health rows from a session and returns every
-// IssueableRisk that passes triage. The graph is needed to look up blast
-// radius (TransitiveDependents) per package.
-func collectRisks(health []*Health, usageRows []*Usage, g *Graph) []IssueableRisk {
-	// Build lookup maps.
-	byPkg := map[string]*Usage{}
+// CollectRisks walks health rows and returns all IssueableRisks that pass triage.
+func CollectRisks(health []*core.Health, usageRows []*core.Usage, g *core.Graph) []IssueableRisk {
+	byPkg := map[string]*core.Usage{}
 	for _, u := range usageRows {
 		byPkg[u.Package] = u
 	}
@@ -140,14 +106,14 @@ func collectRisks(health []*Health, usageRows []*Usage, g *Graph) []IssueableRis
 
 	for _, h := range health {
 		if h.Material {
-			continue // skip packages we couldn't evaluate
+			continue
 		}
 		u := byPkg[h.Package]
-		class := classifyUsage(scanned, h.Dev, u)
-		used := usageSummary(u)
+		class := core.ClassifyUsage(scanned, h.Dev, u)
+		used := core.UsageSummary(u)
 		blast := blastByPkg[h.Package]
 
-		// --- advisory risks ---
+		// --- advisories ---
 		for i := range h.Advisories {
 			adv := h.Advisories[i]
 			eff := blendSeverity(adv.Severity, class)
@@ -162,7 +128,7 @@ func collectRisks(health []*Health, usageRows []*Usage, g *Graph) []IssueableRis
 			}
 		}
 
-		// --- archived risk ---
+		// --- archived ---
 		if h.Archived {
 			r := IssueableRisk{
 				Package: h.Package, Version: h.Version,
@@ -174,8 +140,8 @@ func collectRisks(health []*Health, usageRows []*Usage, g *Graph) []IssueableRis
 			}
 		}
 
-		// --- abandonment risk ---
-		if isAbandonmentRisk(h) {
+		// --- abandonment ---
+		if core.IsAbandonmentRisk(h) {
 			r := IssueableRisk{
 				Package: h.Package, Version: h.Version,
 				Classification: class, Health: h, Usage: u, UsedIn: used,
@@ -187,7 +153,6 @@ func collectRisks(health []*Health, usageRows []*Usage, g *Graph) []IssueableRis
 		}
 	}
 
-	// Sort: advisory > archived > abandonment, then by effective severity, then by blast radius.
 	sevOrder := map[IssueSeverity]int{SeverityCritical: 0, SeverityHigh: 1, SeverityModerate: 2, SeverityLow: 3}
 	typeOrder := map[string]int{"advisory": 0, "archived": 1, "abandonment": 2}
 	sort.SliceStable(risks, func(i, j int) bool {
@@ -201,17 +166,6 @@ func collectRisks(health []*Health, usageRows []*Usage, g *Graph) []IssueableRis
 		return a.BlastRadius > b.BlastRadius
 	})
 	return risks
-}
-
-// ---------- issue body rendering ----------
-
-// IssueDraft is a fully-rendered GitHub issue ready to POST (or preview).
-type IssueDraft struct {
-	Title       string
-	Body        string
-	Labels      []string
-	Fingerprint string // "pkg::advisory" or "pkg::archived" — used for dedup search
-	Risk        IssueableRisk
 }
 
 var issueBodyTmpl = template.Must(template.New("issue").Parse(`## Atlas Dependency Risk Report
@@ -288,26 +242,26 @@ _Usage scan was not available for this analysis run._
 `))
 
 type issueTemplateData struct {
-	Fingerprint    string
-	Date           string
-	Package        string
-	Version        string
-	Classification string
-	GithubRepo     string
-	RiskHeading    string
-	FindingBody    string
-	UsedIn         string
-	BlastRadius    int
-	BlastDetail    string
-	Remediation    string
-	References     []string
-	WeeklyDownloads string
-	LastPublish    string
-	LastCommit     string
+	Fingerprint      string
+	Date             string
+	Package          string
+	Version          string
+	Classification   string
+	GithubRepo       string
+	RiskHeading      string
+	FindingBody      string
+	UsedIn           string
+	BlastRadius      int
+	BlastDetail      string
+	Remediation      string
+	References       []string
+	WeeklyDownloads  string
+	LastPublish      string
+	LastCommit       string
 	ContributorCount int
-	BusFactor      string
-	OpenIssues     int
-	Archived       bool
+	BusFactor        string
+	OpenIssues       int
+	Archived         bool
 }
 
 func renderIssueTitle(r IssueableRisk) string {
@@ -371,7 +325,7 @@ func renderFindingBody(r IssueableRisk) string {
 				"accounts for **%d%%** of all commits in the last 12 months, "+
 				"there are only **%d contributor(s)** total, and the package sees only **%s downloads/week**. "+
 				"If this maintainer steps away, there is little community capacity to pick it up.",
-			r.Package, h.TopContributor, int(h.BusFactor*100), h.ContributorCount, formatCount(h.WeeklyDownloads))
+			r.Package, h.TopContributor, int(h.BusFactor*100), h.ContributorCount, core.FormatCount(h.WeeklyDownloads))
 	}
 	return ""
 }
@@ -439,7 +393,7 @@ func renderBlastDetail(r IssueableRisk) string {
 	return ""
 }
 
-func renderIssueDraft(r IssueableRisk) (IssueDraft, error) {
+func RenderIssueDraft(r IssueableRisk) (IssueDraft, error) {
 	h := r.Health
 	data := issueTemplateData{
 		Fingerprint:      renderFingerprint(r),
@@ -455,11 +409,11 @@ func renderIssueDraft(r IssueableRisk) (IssueDraft, error) {
 		BlastDetail:      renderBlastDetail(r),
 		Remediation:      renderRemediation(r),
 		References:       renderReferences(r),
-		WeeklyDownloads:  formatCount(h.WeeklyDownloads),
-		LastPublish:      dateOrDash(h.LastPublish),
-		LastCommit:       dateOrDash(h.LastCommit),
+		WeeklyDownloads:  core.FormatCount(h.WeeklyDownloads),
+		LastPublish:      core.DateOrDash(h.LastPublish),
+		LastCommit:       core.DateOrDash(h.LastCommit),
 		ContributorCount: h.ContributorCount,
-		BusFactor:        busFactorStr(h),
+		BusFactor:        core.BusFactorStr(h),
 		OpenIssues:       h.OpenIssues,
 		Archived:         h.Archived,
 	}
@@ -507,22 +461,17 @@ func riskHeading(r IssueableRisk) string {
 	return "Dependency Risk"
 }
 
-// ---------- GitHub Issues API ----------
-
-// issueAlreadyExists searches the target repo's open AND closed issues for
-// any that contain the Atlas fingerprint comment. This makes deduplication
-// resilient to title changes and to issues that were closed and re-opened.
-func issueAlreadyExists(targetRepo, fingerprint string) (exists bool, issueNumber int, err error) {
-	// GitHub issue search: look for the fingerprint string in issue bodies.
+// IssueAlreadyExists searches GitHub for existing issue with fingerprint.
+func IssueAlreadyExists(targetRepo, fingerprint string) (exists bool, issueNumber int, err error) {
 	q := fmt.Sprintf(`repo:%s is:issue "atlas:fingerprint=%s"`, targetRepo, fingerprint)
 	u := "https://api.github.com/search/issues?q=" + url.QueryEscape(q) + "&per_page=5"
 
-	body, status, err := httpGet(u, githubHeaders())
+	body, status, err := core.HttpGet(u, core.GithubHeaders())
 	if err != nil {
 		return false, 0, fmt.Errorf("GitHub issue search: %w", err)
 	}
 	if status == 403 || status == 429 {
-		return false, 0, githubRateLimitErr(status)
+		return false, 0, fmt.Errorf("github API rate limit (%d)", status)
 	}
 	if status != 200 {
 		return false, 0, fmt.Errorf("GitHub issue search: %s", http.StatusText(status))
@@ -531,13 +480,11 @@ func issueAlreadyExists(targetRepo, fingerprint string) (exists bool, issueNumbe
 	var result struct {
 		TotalCount int `json:"total_count"`
 		Items      []struct {
-			Number int    `json:"number"`
-			Title  string `json:"title"`
-			State  string `json:"state"`
+			Number int `json:"number"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return false, 0, fmt.Errorf("parse GitHub issue search response: %w", err)
+		return false, 0, fmt.Errorf("parse GitHub search: %w", err)
 	}
 	if result.TotalCount > 0 {
 		return true, result.Items[0].Number, nil
@@ -551,13 +498,13 @@ type githubCreateIssueRequest struct {
 	Labels []string `json:"labels"`
 }
 
-type githubCreatedIssue struct {
+type GithubCreatedIssue struct {
 	Number  int    `json:"number"`
 	HTMLURL string `json:"html_url"`
 }
 
-// createGithubIssue POSTs a new issue to the target repo and returns its URL.
-func createGithubIssue(targetRepo string, draft IssueDraft) (githubCreatedIssue, error) {
+// CreateGithubIssue POSTs a single issue to GitHub.
+func CreateGithubIssue(targetRepo string, draft IssueDraft) (GithubCreatedIssue, error) {
 	payload := githubCreateIssueRequest{
 		Title:  draft.Title,
 		Body:   draft.Body,
@@ -565,58 +512,45 @@ func createGithubIssue(targetRepo string, draft IssueDraft) (githubCreatedIssue,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
-		return githubCreatedIssue{}, err
+		return GithubCreatedIssue{}, err
 	}
 	u := fmt.Sprintf("https://api.github.com/repos/%s/issues", targetRepo)
 	req, err := http.NewRequest("POST", u, bytes.NewReader(b))
 	if err != nil {
-		return githubCreatedIssue{}, err
+		return GithubCreatedIssue{}, err
 	}
-	for k, v := range githubHeaders() {
+	for k, v := range core.GithubHeaders() {
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return githubCreatedIssue{}, err
+		return GithubCreatedIssue{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 403 || resp.StatusCode == 429 {
-		return githubCreatedIssue{}, githubRateLimitErr(resp.StatusCode)
+		return GithubCreatedIssue{}, fmt.Errorf("GitHub API rate limit (%d)", resp.StatusCode)
 	}
 	if resp.StatusCode == 401 {
-		return githubCreatedIssue{}, fmt.Errorf("GitHub returned 401 Unauthorized — your GITHUB_TOKEN may lack 'repo' scope (needed to create issues). Update it under Settings > Developer settings > Personal access tokens")
+		return GithubCreatedIssue{}, fmt.Errorf("GitHub returned 401 Unauthorized — your GITHUB_TOKEN may lack 'repo' scope")
 	}
 	if resp.StatusCode == 404 {
-		return githubCreatedIssue{}, fmt.Errorf("repo %q not found or not accessible with your GITHUB_TOKEN", targetRepo)
+		return GithubCreatedIssue{}, fmt.Errorf("repo %q not found or not accessible with your GITHUB_TOKEN", targetRepo)
 	}
 	if resp.StatusCode != 201 {
-		return githubCreatedIssue{}, fmt.Errorf("GitHub create issue: %s", http.StatusText(resp.StatusCode))
+		return GithubCreatedIssue{}, fmt.Errorf("GitHub create issue: %s", http.StatusText(resp.StatusCode))
 	}
 
-	var created githubCreatedIssue
-	bodyBytes, _ := readAll(resp)
-	if err := json.Unmarshal(bodyBytes, &created); err != nil {
-		return githubCreatedIssue{}, fmt.Errorf("parse create issue response: %w", err)
+	var created GithubCreatedIssue
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		return GithubCreatedIssue{}, fmt.Errorf("parse create issue response: %w", err)
 	}
 	return created, nil
 }
 
-// readAll reads from http.Response body into a []byte (avoids importing io
-// again at the top — we already pull it in health.go in the same package).
-func readAll(resp *http.Response) ([]byte, error) {
-	var buf bytes.Buffer
-	_, err := buf.ReadFrom(resp.Body)
-	return buf.Bytes(), err
-}
-
-// ---------- summary formatting ----------
-
-// FormatDraftSummary returns a human-readable preview of all planned issues,
-// used by the agent tool to show the user what will be filed before asking
-// for confirmation.
+// FormatDraftSummary returns formatted text preview of drafts.
 func FormatDraftSummary(drafts []IssueDraft) string {
 	if len(drafts) == 0 {
 		return "No fiileable issues found. All risks are either below the severity threshold, limited to build/test dependencies, or already filed."
@@ -652,4 +586,82 @@ func riskSummaryLine(r IssueableRisk) string {
 		parts = append(parts, "used in: "+r.UsedIn)
 	}
 	return strings.Join(parts, " · ")
+}
+
+// CheckDuplicatesConcurrently checks deduplication concurrently across drafts.
+func CheckDuplicatesConcurrently(ctx context.Context, targetRepo string, drafts []IssueDraft, maxConcurrent int) map[string]int {
+	type dedupResult struct {
+		fingerprint string
+		exists      bool
+		issueNum    int
+	}
+
+	results, _ := RunParallel(ctx, drafts, maxConcurrent, func(c context.Context, d IssueDraft) (dedupResult, error) {
+		exists, num, err := IssueAlreadyExists(targetRepo, d.Fingerprint)
+		if err != nil {
+			return dedupResult{fingerprint: d.Fingerprint, exists: false}, err
+		}
+		return dedupResult{fingerprint: d.Fingerprint, exists: exists, issueNum: num}, nil
+	})
+
+	existing := make(map[string]int)
+	for _, r := range results {
+		if r.exists {
+			existing[r.fingerprint] = r.issueNum
+		}
+	}
+	return existing
+}
+
+// IssueDispatchResult captures the outcome of creating an issue.
+type IssueDispatchResult struct {
+	Title   string
+	URL     string
+	Number  int
+	Skipped bool
+	SkipNum int
+	Err     string
+}
+
+// CreateIssuesConcurrently dispatches issue creation with a concurrency limiter and polite pacing.
+func (a *ActionAgent) CreateIssuesConcurrently(ctx context.Context, targetRepo string, drafts []IssueDraft) []IssueDispatchResult {
+	results := make([]IssueDispatchResult, len(drafts))
+
+	// 1. Run concurrent duplicate checks first
+	existing := CheckDuplicatesConcurrently(ctx, targetRepo, drafts, 3)
+
+	// 2. Dispatch remaining issues concurrently with rate limiting
+	for i, d := range drafts {
+		results[i].Title = d.Title
+
+		if num, ok := existing[d.Fingerprint]; ok {
+			results[i].Skipped = true
+			results[i].SkipNum = num
+			continue
+		}
+
+		// Execute with concurrency limiter + slight backoff to avoid secondary rate limits
+		var created GithubCreatedIssue
+		var createErr error
+
+		a.limiter.Run(func() {
+			created, createErr = core.WithSpinnerResult(
+				fmt.Sprintf("Creating issue: %s", d.Risk.Package),
+				func() (GithubCreatedIssue, error) {
+					// polite pause between API writes
+					time.Sleep(300 * time.Millisecond)
+					return CreateGithubIssue(targetRepo, d)
+				},
+			)
+		})
+
+		if createErr != nil {
+			results[i].Err = createErr.Error()
+		} else {
+			results[i].URL = created.HTMLURL
+			results[i].Number = created.Number
+		}
+	}
+
+	return results
 }

@@ -1,290 +1,25 @@
-// Atlas step 1: build a dependency graph G=(V,E) from an npm package-lock.json
-// (lockfileVersion 2 or 3) and compute structural metrics.
+// Atlas: dependency graph analysis and multi-agent risk assessment.
 //
 // Usage:
-//
 //	go run . -repo expressjs/express            # fetches package-lock.json from default branch
 //	go run . -repo owner/repo -ref main -dir packages/app
 //	go run . -file ./package-lock.json          # local file
 //	go run . -repo owner/repo -top 30
-//
-// Private repos work too: set GITHUB_TOKEN (in .env or the environment) with
-// read access to the repo.
+//	go run .                                    # launches multi-agent interactive REPL
 package main
 
 import (
-	"encoding/base64"
+	"atlas/agents"
+	"atlas/core"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
-	"time"
 )
 
-// ---------- lockfile parsing ----------
-
-type lockEntry struct {
-	Version              string            `json:"version"`
-	Link                 bool              `json:"link"`
-	Dev                  bool              `json:"dev"`
-	Dependencies         map[string]string `json:"dependencies"`
-	DevDependencies      map[string]string `json:"devDependencies"`
-	OptionalDependencies map[string]string `json:"optionalDependencies"`
-	PeerDependencies     map[string]string `json:"peerDependencies"`
-}
-
-type lockfile struct {
-	Name            string               `json:"name"`
-	LockfileVersion int                  `json:"lockfileVersion"`
-	Packages        map[string]lockEntry `json:"packages"`     // v2/v3
-	V1Deps          map[string]v1Entry   `json:"dependencies"` // v1 (and legacy section of v2)
-}
-
-// ---------- graph ----------
-
-// Node is a vertex: one installed package (a specific path in node_modules).
-type Node struct {
-	ID      string // lockfile key, e.g. "node_modules/a/node_modules/b"; "" = root
-	Name    string // e.g. "b" or "@scope/b"
-	Version string
-	Dev     bool
-
-	Out []string // edges: packages this node depends on
-	In  []string // reverse edges: packages that depend on this node
-
-	// computed metrics
-	Depth                int  // hops from root (1 = direct dependency)
-	Direct               bool // listed in root manifest
-	TransitiveDependents int  // distinct packages that reach this one (excl. root)
-}
-
-type Graph struct {
-	Nodes map[string]*Node
-	Root  *Node
-}
-
-// nameFromPath turns "node_modules/a/node_modules/@s/b" into "@s/b".
-func nameFromPath(p string) string {
-	i := strings.LastIndex(p, "node_modules/")
-	if i < 0 {
-		return p
-	}
-	return p[i+len("node_modules/"):]
-}
-
-// resolve mimics Node's resolution: look in from/node_modules/name, then walk up
-// parent node_modules directories until the root.
-func resolve(pkgs map[string]lockEntry, from, name string) (string, bool) {
-	base := from
-	for {
-		cand := "node_modules/" + name
-		if base != "" {
-			cand = base + "/node_modules/" + name
-		}
-		if _, ok := pkgs[cand]; ok {
-			return cand, true
-		}
-		if base == "" {
-			return "", false
-		}
-		i := strings.LastIndex(base, "node_modules/")
-		if i <= 0 {
-			base = ""
-		} else {
-			base = strings.TrimSuffix(base[:i], "/")
-		}
-	}
-}
-
-func buildGraph(lf *lockfile) (*Graph, error) {
-	if len(lf.Packages) == 0 {
-		return nil, fmt.Errorf("no packages found in lockfile (lockfileVersion %d)", lf.LockfileVersion)
-	}
-	g := &Graph{Nodes: map[string]*Node{}}
-
-	for id, e := range lf.Packages {
-		n := &Node{ID: id, Name: nameFromPath(id), Version: e.Version, Dev: e.Dev}
-		if id == "" {
-			n.Name = lf.Name
-			if n.Name == "" {
-				n.Name = "(root)"
-			}
-		}
-		g.Nodes[id] = n
-	}
-	g.Root = g.Nodes[""]
-	if g.Root == nil {
-		return nil, fmt.Errorf("lockfile has no root entry")
-	}
-
-	addEdges := func(from string, deps map[string]string) {
-		for name := range deps {
-			to, ok := resolve(lf.Packages, from, name)
-			if !ok {
-				continue // optional/peer dep that was not installed
-			}
-			g.Nodes[from].Out = append(g.Nodes[from].Out, to)
-			g.Nodes[to].In = append(g.Nodes[to].In, from)
-		}
-	}
-	for id, e := range lf.Packages {
-		addEdges(id, e.Dependencies)
-		addEdges(id, e.OptionalDependencies)
-		addEdges(id, e.PeerDependencies)
-		if id == "" {
-			addEdges(id, e.DevDependencies)
-		}
-	}
-	dedupe(g)
-	computeMetrics(g)
-	return g, nil
-}
-
-func dedupe(g *Graph) {
-	uniq := func(s []string) []string {
-		seen := map[string]bool{}
-		out := s[:0]
-		for _, x := range s {
-			if !seen[x] {
-				seen[x] = true
-				out = append(out, x)
-			}
-		}
-		return out
-	}
-	for _, n := range g.Nodes {
-		n.Out = uniq(n.Out)
-		n.In = uniq(n.In)
-	}
-}
-
-func computeMetrics(g *Graph) {
-	// Depth: BFS from root along forward edges.
-	depth := map[string]int{"": 0}
-	queue := []string{""}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		for _, nxt := range g.Nodes[cur].Out {
-			if _, seen := depth[nxt]; !seen {
-				depth[nxt] = depth[cur] + 1
-				queue = append(queue, nxt)
-			}
-		}
-	}
-	for id, n := range g.Nodes {
-		if d, ok := depth[id]; ok {
-			n.Depth = d
-		} else {
-			n.Depth = -1 // not reachable from root (e.g. unused workspace)
-		}
-		n.Direct = n.Depth == 1
-	}
-
-	// Transitive dependents: reverse BFS from each node along In edges.
-	// This is the blast-radius upper bound: "if this breaks, who is affected?"
-	for id, n := range g.Nodes {
-		if id == "" {
-			continue
-		}
-		seen := map[string]bool{id: true}
-		stack := []string{id}
-		for len(stack) > 0 {
-			cur := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			for _, parent := range g.Nodes[cur].In {
-				if !seen[parent] {
-					seen[parent] = true
-					stack = append(stack, parent)
-				}
-			}
-		}
-		count := len(seen) - 1 // exclude itself
-		if seen[""] {
-			count-- // exclude the root app
-		}
-		n.TransitiveDependents = count
-	}
-}
-
-// ---------- fetching ----------
-
-func fetchFile(repo, ref, dir, name string) ([]byte, error) {
-	if ref == "" {
-		ref = "HEAD" // raw.githubusercontent.com resolves HEAD to the default branch
-	}
-	path := name
-	if dir != "" {
-		path = strings.Trim(dir, "/") + "/" + path
-	}
-	owner, rname, ok := strings.Cut(repo, "/")
-	if !ok || owner == "" || rname == "" {
-		return nil, fmt.Errorf("invalid repo spec %q (want owner/name)", repo)
-	}
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s", owner, rname, path, ref)
-
-	req, _ := http.NewRequest("GET", url, nil)
-	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GET %s: %s (does the repo have a committed %q at that path?)%s", url, resp.Status, name, githubAccessHint(resp.StatusCode))
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	var ghFile struct {
-		Content  string `json:"content"`
-		Encoding string `json:"encoding"`
-		Message  string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &ghFile); err != nil {
-		return nil, fmt.Errorf("parse github contents response: %w", err)
-	}
-	if ghFile.Content == "" {
-		return nil, fmt.Errorf("GET %s: %s (no content returned)", url, resp.Status)
-	}
-	switch ghFile.Encoding {
-	case "base64":
-		data, err := base64.StdEncoding.DecodeString(ghFile.Content)
-		if err != nil {
-			return nil, fmt.Errorf("decode base64 content: %w", err)
-		}
-		return data, nil
-	default:
-		return nil, fmt.Errorf("unsupported github content encoding %q", ghFile.Encoding)
-	}
-}
-
-// githubAccessHint explains the most common reason a GitHub API call comes
-// back 404/401/403: the repo is private and GITHUB_TOKEN either isn't set or
-// doesn't have the "repo" scope needed to read it.
-func githubAccessHint(status int) string {
-	if status != 404 && status != 401 && status != 403 {
-		return ""
-	}
-	if os.Getenv("GITHUB_TOKEN") == "" {
-		return " -- if this is a private repo, set GITHUB_TOKEN (a token with repo scope) and retry"
-	}
-	return " -- if this is a private repo, your GITHUB_TOKEN likely lacks access: update its scope to include \"repo\" in GitHub settings (Settings > Developer settings > Personal access tokens) and retry"
-}
-
-// ---------- main ----------
-
 func main() {
-	loadDotEnv(".env")
+	core.LoadDotEnv(".env")
 
 	repo := flag.String("repo", "", "GitHub repo as owner/name")
 	ref := flag.String("ref", "", "branch, tag or sha (default: default branch)")
@@ -302,7 +37,7 @@ func main() {
 	flag.Parse()
 
 	if *repo == "" && *file == "" {
-		runAgentMode(*model)
+		agents.RunAgentMode(*model)
 		return
 	}
 
@@ -312,49 +47,47 @@ func main() {
 	case *file != "":
 		data, err = os.ReadFile(*file)
 	case *repo != "":
-		data, err = fetchFile(*repo, *ref, *dir, "package-lock.json")
+		data, err = core.FetchFile(*repo, *ref, *dir, "package-lock.json")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 
-	var lf lockfile
+	var lf core.Lockfile
 	if err := json.Unmarshal(data, &lf); err != nil {
 		fmt.Fprintln(os.Stderr, "parse error:", err)
 		os.Exit(1)
 	}
 	if len(lf.Packages) == 0 && len(lf.V1Deps) > 0 {
-		// lockfileVersion 1 has no root entry; we need package.json to know the direct deps.
-		pj, err := loadPackageJSON(*repo, *ref, *dir, *file)
+		pj, err := core.LoadPackageJSON(*repo, *ref, *dir, *file)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error: v1 lockfile needs package.json:", err)
 			os.Exit(1)
 		}
-		convertV1(&lf, pj)
+		core.ConvertV1(&lf, pj)
 	}
-	g, err := buildGraph(&lf)
+	g, err := core.BuildGraph(&lf)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 
-	fmt.Print(graphReport(g, *top))
+	fmt.Print(core.GraphReport(g, *top))
 
 	if *viz != "" {
-		if err := writeViz(g, *viz, *vizMax); err != nil {
+		if err := core.WriteViz(g, *viz, *vizMax); err != nil {
 			fmt.Fprintln(os.Stderr, "viz error:", err)
 		} else {
 			fmt.Printf("\nWrote interactive graph to %s (open it in a browser)\n", *viz)
 		}
 	}
 
-	// ---- step 3: health signals ----
 	if *health {
-		rows := runHealth(g, *healthTop)
-		printHealth(rows)
+		rows := core.RunHealth(g, *healthTop)
+		core.PrintHealth(rows)
 		if *healthJSON != "" {
-			if err := writeHealthJSON(rows, *healthJSON); err != nil {
+			if err := core.WriteHealthJSON(rows, *healthJSON); err != nil {
 				fmt.Fprintln(os.Stderr, "health json error:", err)
 			} else {
 				fmt.Printf("\nWrote health report to %s\n", *healthJSON)
@@ -362,10 +95,9 @@ func main() {
 		}
 	}
 
-	// ---- step 2: usage scan ----
 	srcDir := *src
 	if srcDir == "" && *repo != "" {
-		d, cleanup, err := cloneRepo(*repo, *ref)
+		d, cleanup, err := core.CloneRepo(*repo, *ref)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "clone error:", err)
 			os.Exit(1)
@@ -376,59 +108,6 @@ func main() {
 		srcDir = filepath.Dir(*file)
 	}
 	if srcDir != "" {
-		runScan(g, srcDir, *show, true)
+		core.RunScan(g, srcDir, *show, true)
 	}
-}
-
-// rankNodes returns every reachable, non-root node ranked by blast-radius
-// upper bound (then direct fan-in), plus the raw edge/direct-dep counts.
-// Shared by the one-shot CLI table, the agent's chat-facing summary, and the
-// HTML report's graph table.
-func rankNodes(g *Graph) (list []*Node, edges, direct int) {
-	for id, n := range g.Nodes {
-		edges += len(n.Out)
-		if id == "" || n.Depth < 0 {
-			continue
-		}
-		if n.Direct {
-			direct++
-		}
-		list = append(list, n)
-	}
-
-	sort.Slice(list, func(i, j int) bool {
-		a, b := list[i], list[j]
-		if a.TransitiveDependents != b.TransitiveDependents {
-			return a.TransitiveDependents > b.TransitiveDependents
-		}
-		if len(a.In) != len(b.In) {
-			return len(a.In) > len(b.In)
-		}
-		return a.Name < b.Name
-	})
-	return list, edges, direct
-}
-
-// graphReport renders the summary + ranked table as text.
-func graphReport(g *Graph, top int) string {
-	list, edges, direct := rankNodes(g)
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "Graph: %d vertices, %d edges, %d direct deps\n\n", len(g.Nodes), edges, direct)
-	fmt.Fprintf(&b, "%-40s %-10s %-7s %-6s %-9s %s\n", "PACKAGE", "VERSION", "DIRECT", "DEPTH", "DEPENDENTS", "TRANSITIVE")
-	for i, n := range list {
-		if i >= top {
-			break
-		}
-		fmt.Fprintf(&b, "%-40s %-10s %-7v %-6d %-9d  %d\n",
-			trunc(n.Name, 40), trunc(n.Version, 10), n.Direct, n.Depth, len(n.In), n.TransitiveDependents)
-	}
-	return b.String()
-}
-
-func trunc(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
 }
