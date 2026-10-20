@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 )
 
 // FetchFile retrieves a file from GitHub API.
@@ -31,8 +30,7 @@ func FetchFile(repo, ref, dir, name string) ([]byte, error) {
 	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := SharedHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
