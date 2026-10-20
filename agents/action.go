@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -470,11 +471,9 @@ func IssueAlreadyExists(targetRepo, fingerprint string) (exists bool, issueNumbe
 	if err != nil {
 		return false, 0, fmt.Errorf("GitHub issue search: %w", err)
 	}
-	if status == 403 || status == 429 {
-		return false, 0, fmt.Errorf("github API rate limit (%d)", status)
-	}
 	if status != 200 {
-		return false, 0, fmt.Errorf("GitHub issue search: %s", http.StatusText(status))
+		// HttpGet doesn't expose headers; classify from the status alone.
+		return false, 0, core.GithubRequestError("Atlas was checking GitHub for an existing issue.", targetRepo, status, nil, body)
 	}
 
 	var result struct {
@@ -529,17 +528,10 @@ func CreateGithubIssue(targetRepo string, draft IssueDraft) (GithubCreatedIssue,
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 403 || resp.StatusCode == 429 {
-		return GithubCreatedIssue{}, fmt.Errorf("GitHub API rate limit (%d)", resp.StatusCode)
-	}
-	if resp.StatusCode == 401 {
-		return GithubCreatedIssue{}, fmt.Errorf("GitHub returned 401 Unauthorized — your GITHUB_TOKEN may lack 'repo' scope")
-	}
-	if resp.StatusCode == 404 {
-		return GithubCreatedIssue{}, fmt.Errorf("repo %q not found or not accessible with your GITHUB_TOKEN", targetRepo)
-	}
 	if resp.StatusCode != 201 {
-		return GithubCreatedIssue{}, fmt.Errorf("GitHub create issue: %s", http.StatusText(resp.StatusCode))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return GithubCreatedIssue{}, core.GithubRequestError(
+			fmt.Sprintf("Atlas was creating an issue in %s.", targetRepo), targetRepo, resp.StatusCode, resp.Header, body)
 	}
 
 	var created GithubCreatedIssue
@@ -655,7 +647,7 @@ func (a *ActionAgent) CreateIssuesConcurrently(ctx context.Context, targetRepo s
 		})
 
 		if createErr != nil {
-			results[i].Err = createErr.Error()
+			results[i].Err = core.ShortError(createErr)
 		} else {
 			results[i].URL = created.HTMLURL
 			results[i].Number = created.Number

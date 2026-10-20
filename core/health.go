@@ -65,8 +65,13 @@ func GithubHeaders() map[string]string {
 	return h
 }
 
+// githubRateLimitErr is used where only the status code is available (no
+// headers), so it cannot tell a rate limit from a permission failure and says so.
 func githubRateLimitErr(status int) error {
-	return fmt.Errorf("github API returned %s (set GITHUB_TOKEN to raise the rate limit)", http.StatusText(status))
+	if os.Getenv("GITHUB_TOKEN") == "" {
+		return fmt.Errorf("github API returned HTTP %d: rate limit or access denied (no GITHUB_TOKEN is set; setting one raises the limit)", status)
+	}
+	return fmt.Errorf("github API returned HTTP %d: rate limit or access denied (the response did not say which)", status)
 }
 
 // ---------- npm registry ----------
