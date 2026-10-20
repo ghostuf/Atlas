@@ -48,6 +48,19 @@ func main() {
 		return
 	}
 
+	// One-shot mode doesn't use Ollama, and a token is optional (public repos
+	// work without one). If a token is set and GitHub will be called, check
+	// that GitHub accepts it: a rejected token fails every request, public
+	// repositories included.
+	pre := core.Preflight(core.PreflightOptions{CheckGithub: *repo != "" || *health})
+	for _, w := range pre.Warnings {
+		fmt.Fprintln(os.Stderr, core.FormatWarning(w))
+	}
+	if len(pre.Blocking) > 0 {
+		fmt.Fprintln(os.Stderr, core.FormatErrors(pre.Blocking, core.PreflightHeader))
+		os.Exit(1)
+	}
+
 	if *cpuprofile != "" {
 		f, err := os.Create(*cpuprofile)
 		if err != nil {
@@ -91,31 +104,36 @@ func main() {
 	var err error
 	switch {
 	case *file != "":
-		data, err = os.ReadFile(*file)
+		data, err = core.ReadLocalFile(*file, "lockfile")
 	case *repo != "":
 		data, err = core.FetchFile(*repo, *ref, *dir, "package-lock.json")
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, core.FormatError(err))
 		os.Exit(1)
 	}
 
 	var lf core.Lockfile
 	if err := json.Unmarshal(data, &lf); err != nil {
-		fmt.Fprintln(os.Stderr, "parse error:", err)
+		src := "package-lock.json from " + *repo
+		if *file != "" {
+			src = *file
+		}
+		fmt.Fprintln(os.Stderr, core.FormatError(core.LockfileParseError(err, src)))
 		os.Exit(1)
 	}
 	if len(lf.Packages) == 0 && len(lf.V1Deps) > 0 {
 		pj, err := core.LoadPackageJSON(*repo, *ref, *dir, *file)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "error: v1 lockfile needs package.json:", err)
+			fmt.Fprintln(os.Stderr, core.FormatError(core.Annotate(err,
+				"This is a version 1 lockfile, which does not list the project's direct dependencies, so Atlas also needs its package.json.")))
 			os.Exit(1)
 		}
 		core.ConvertV1(&lf, pj)
 	}
 	g, err := core.BuildGraph(&lf)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, core.FormatError(err))
 		os.Exit(1)
 	}
 
@@ -145,7 +163,7 @@ func main() {
 	if srcDir == "" && *repo != "" {
 		d, cleanup, err := core.CloneRepo(*repo, *ref)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "clone error:", err)
+			fmt.Fprintln(os.Stderr, core.FormatError(err))
 			os.Exit(1)
 		}
 		defer cleanup()

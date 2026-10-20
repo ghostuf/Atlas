@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -69,13 +70,13 @@ about analyzing, auditing, or checking a repository's dependencies:
      directly to the user in plain language (how many created, with links;
      how many skipped as duplicates; how many failed and why) — this does
      NOT go into the HTML report, so say it plainly in the chat yourself.
-     If every failure mentions a 401/403 or "lacks 'repo' scope", don't just
-     repeat the raw error — tell the user plainly: their GITHUB_TOKEN doesn't
-     have permission to create issues in that repo, they should update its
-     scope to include "repo" (or, for a fine-grained token, add "Issues:
-     Read and write" for that repo) in GitHub settings, and come back and
-     ask again once it's updated. Never call create_github_issues again on
-     the same drafts without a fresh explicit yes from the user.`
+     Each failure line already states what GitHub reported and the next
+     step. Relay it faithfully and do not add causes it doesn't state:
+     HTTP 401 means GitHub rejected the token itself (invalid/expired), HTTP
+     403 means access was refused (a missing permission, or a rate limit if
+     the line says so), and HTTP 404 means the repo wasn't found or isn't
+     visible to the token. Never call create_github_issues again on the same
+     drafts without a fresh explicit yes from the user.`
 
 // Session tracks the active analysis state in a conversation.
 type Session struct {
@@ -112,6 +113,9 @@ type OrchestratorAgent struct {
 	actionAg     *ActionAgent
 	limiter      *ConcurrencyLimiter
 	sess         *Session
+
+	errOut io.Writer // where user-facing errors are shown (stderr)
+	failed bool      // a tool reported a failure to the user this turn
 }
 
 // NewOrchestratorAgent creates a generalist Orchestrator with parallel specialist agents.
@@ -126,7 +130,18 @@ func NewOrchestratorAgent(model string) *OrchestratorAgent {
 		actionAg:   NewActionAgent(limiter),
 		limiter:    limiter,
 		sess:       &Session{},
+		errOut:     os.Stderr,
 	}
+}
+
+// fail shows err to the user directly, exactly as written, and gives the
+// model only a terse result. Routing the full text through the model let it
+// paraphrase and speculate about causes Atlas had not established.
+func (o *OrchestratorAgent) fail(err error) string {
+	fmt.Fprintln(o.errOut, core.FormatError(err))
+	o.failed = true
+	return "FAILED: " + core.Redact(err.Error()) +
+		". Atlas has already shown the user the full error and next steps. Do not add explanations or guesses about the cause."
 }
 
 func (o *OrchestratorAgent) Name() string {
@@ -147,14 +162,14 @@ func (o *OrchestratorAgent) AnalyzeRepository(repo, file, ref, dir string) strin
 	fetchErr := core.WithSpinner("Fetching lockfile", func() error {
 		var err error
 		if file != "" {
-			data, err = os.ReadFile(file)
+			data, err = core.ReadLocalFile(file, "lockfile")
 		} else {
 			data, err = core.FetchFile(repo, ref, dir, "package-lock.json")
 		}
 		return err
 	})
 	if fetchErr != nil {
-		return "error fetching lockfile: " + fetchErr.Error()
+		return o.fail(fetchErr)
 	}
 	o.sess.Reset()
 
@@ -162,12 +177,16 @@ func (o *OrchestratorAgent) AnalyzeRepository(repo, file, ref, dir string) strin
 	buildErr := core.WithSpinner("Analyzing dependencies", func() error {
 		var lf core.Lockfile
 		if err := json.Unmarshal(data, &lf); err != nil {
-			return err
+			src := "package-lock.json from " + repo
+			if file != "" {
+				src = file
+			}
+			return core.LockfileParseError(err, src)
 		}
 		if len(lf.Packages) == 0 && len(lf.V1Deps) > 0 {
 			pj, err := core.LoadPackageJSON(repo, ref, dir, file)
 			if err != nil {
-				return fmt.Errorf("v1 lockfile needs package.json: %w", err)
+				return core.Annotate(err, "This is a version 1 lockfile, which does not list the project's direct dependencies, so Atlas also needs its package.json.")
 			}
 			core.ConvertV1(&lf, pj)
 		}
@@ -176,7 +195,7 @@ func (o *OrchestratorAgent) AnalyzeRepository(repo, file, ref, dir string) strin
 		return err
 	})
 	if buildErr != nil {
-		return "error: " + buildErr.Error()
+		return o.fail(buildErr)
 	}
 	_, edges, direct := core.RankNodes(g)
 	core.Detail("%d packages, %d edges, %d direct dependencies", len(g.Nodes), edges, direct)
@@ -202,7 +221,7 @@ func (o *OrchestratorAgent) AnalyzeRepository(repo, file, ref, dir string) strin
 	})
 	core.Detail("%s", vizPath)
 
-	_ = core.WithSpinner("Cloning repository", func() error {
+	cloneErr := core.WithSpinner("Cloning repository", func() error {
 		if file != "" {
 			o.sess.SrcDir = filepath.Dir(file)
 			return nil
@@ -217,7 +236,15 @@ func (o *OrchestratorAgent) AnalyzeRepository(repo, file, ref, dir string) strin
 	})
 
 	report := core.GraphReport(g, 15)
-	usageText := o.ScanUsage("")
+	var usageText string
+	if cloneErr != nil {
+		// Previously discarded: the user saw a bare ✗ and the usage scan
+		// silently never ran. Show why, and say what is missing.
+		fmt.Fprintln(o.errOut, core.FormatError(cloneErr))
+		usageText = "usage scan skipped: the repository could not be cloned (the error was shown to the user); health results below have no usage context"
+	} else {
+		usageText = o.ScanUsage("")
+	}
 	healthJSON := o.CheckHealth(0)
 
 	// ---- Step 4: Parallel Agentic Analysis ----
@@ -739,28 +766,41 @@ func (o *OrchestratorAgent) DispatchTool(tc core.OllamaToolCall) string {
 	}
 }
 
-func ensureGithubToken() {
+// promptGithubToken asks for a token when none is configured. It does not
+// validate or exit: an empty answer is reported by core.Preflight together
+// with any other startup problem.
+func promptGithubToken() {
 	if os.Getenv("GITHUB_TOKEN") != "" {
 		return
 	}
-	fmt.Println("Atlas needs a GitHub token to clone repos and check dependency health.")
+	fmt.Println("Atlas needs a GitHub token to read private repositories, create issues, and avoid GitHub's low unauthenticated rate limit.")
 	fmt.Print("GITHUB_TOKEN: ")
 	reader := bufio.NewReader(os.Stdin)
 	tok, _ := reader.ReadString('\n')
-	tok = strings.TrimSpace(tok)
-	if tok == "" {
-		fmt.Fprintln(os.Stderr, "no token provided, exiting")
-		os.Exit(1)
+	if tok = strings.TrimSpace(tok); tok != "" {
+		os.Setenv("GITHUB_TOKEN", tok)
 	}
-	os.Setenv("GITHUB_TOKEN", tok)
 }
 
 // RunAgentMode starts the interactive REPL with the orchestrator.
+//
+// Startup validation order is documented on core.Preflight: configuration,
+// then GitHub, then Ollama. All independent failures are shown together and
+// the REPL does not start if any is blocking.
 func RunAgentMode(model string) {
-	ensureGithubToken()
+	promptGithubToken()
 
-	if err := core.CheckOllamaModel(model); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+	pre := core.Preflight(core.PreflightOptions{
+		RequireGithubToken: true,
+		CheckGithub:        true,
+		CheckOllama:        true,
+		Model:              model,
+	})
+	for _, w := range pre.Warnings {
+		fmt.Fprintln(os.Stderr, core.FormatWarning(w))
+	}
+	if len(pre.Blocking) > 0 {
+		fmt.Fprintln(os.Stderr, core.FormatErrors(pre.Blocking, core.PreflightHeader))
 		os.Exit(1)
 	}
 
@@ -790,7 +830,7 @@ func RunAgentMode(model string) {
 
 		history = append(history, core.OllamaMessage{Role: "user", Content: line})
 		if err := orch.RunTurn(model, &history, tools); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
+			fmt.Fprintln(os.Stderr, core.FormatError(err))
 		}
 	}
 }
@@ -854,6 +894,12 @@ func (o *OrchestratorAgent) RunTurn(model string, history *[]core.OllamaMessage,
 			result := o.DispatchTool(tc)
 			*history = append(*history, core.OllamaMessage{Role: "tool", Content: result})
 		}
+		if o.failed {
+			// The user has already been shown the failure verbatim; don't
+			// give the model another turn to restate or speculate about it.
+			o.failed = false
+			return nil
+		}
 	}
 
 	fmt.Println("\natlas> (stopped after several tool calls without a final answer — try a more specific question)")
@@ -866,7 +912,7 @@ func (o *OrchestratorAgent) RunTurn(model string, history *[]core.OllamaMessage,
 func (o *OrchestratorAgent) announceReport(reasoning string) {
 	path, err := o.WriteSessionReport(reasoning)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "report generation failed:", err)
+		fmt.Fprintln(os.Stderr, "warning: the HTML report could not be written:", core.Redact(err.Error()))
 		return
 	}
 	fmt.Printf("\n✓ Prepared report: %s — open in your browser to inspect interactive graphs and multi-agent risk profiles.\n", path)

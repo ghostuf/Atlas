@@ -2,8 +2,6 @@ package core
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
 	"path/filepath"
 )
 
@@ -32,7 +30,7 @@ func LoadPackageJSON(repo, ref, dir, file string) (*PackageJSON, error) {
 	var data []byte
 	var err error
 	if file != "" {
-		data, err = os.ReadFile(filepath.Join(filepath.Dir(file), "package.json"))
+		data, err = ReadLocalFile(filepath.Join(filepath.Dir(file), "package.json"), "package.json")
 	} else {
 		data, err = FetchFile(repo, ref, dir, "package.json")
 	}
@@ -41,7 +39,7 @@ func LoadPackageJSON(repo, ref, dir, file string) (*PackageJSON, error) {
 	}
 	var pj PackageJSON
 	if err := json.Unmarshal(data, &pj); err != nil {
-		return nil, fmt.Errorf("parse package.json: %w", err)
+		return nil, LockfileParseError(err, "package.json")
 	}
 	return &pj, nil
 }

@@ -69,3 +69,21 @@ go run . -file ./package-lock.json
 # Run unit tests
 go test -v ./...
 ```
+
+## Startup Validation & Errors
+
+Atlas checks what the requested operation needs *before* doing any work, and reports every failure it can establish in one go. Checks that do not depend on each other run independently, so one failure never hides another. Reporting order is fixed:
+
+1. **Configuration**: `GITHUB_TOKEN` present (interactive mode only), a model name, a well-formed `OLLAMA_HOST`.
+2. **GitHub**: is `GITHUB_TOKEN` accepted by GitHub? One call to `GET /rate_limit`, which needs no scope and does not count against the rate limit. This establishes token *validity* only; access to a particular repository is determined when it is fetched.
+3. **Ollama**: reachable? Only if it answered is the model looked for (so "model not installed" is never reported for an unreachable server).
+
+| Mode | Token | Ollama |
+|------|-------|--------|
+| `go run .` (interactive) | required; validated | required; model checked |
+| `go run . -repo owner/name` | optional; validated if set (a rejected token fails public repos too) | not used |
+| `go run . -file ...` | validated only if set and `-health` is on | not used |
+
+If any blocking prerequisite fails, nothing else runs. A token that cannot be verified because GitHub is rate-limiting or down is a warning, not a blocker.
+
+Errors share one shape: what failed, what Atlas was doing, **Known** (facts proven by a response or syscall), **Not verified** (hypotheses, always labelled), **Next** (concrete steps), and redacted technical **Detail**. Credentials are removed from every message, including text echoed back by `git` or GitHub.

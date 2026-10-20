@@ -6,3 +6,4 @@ reports/
 *.exe~
 *.pprof
 *.out
+*.patch

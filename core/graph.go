@@ -90,7 +90,7 @@ func Resolve(pkgs map[string]LockEntry, from, name string) (string, bool) {
 // BuildGraph builds the in-memory dependency graph from parsed lockfile.
 func BuildGraph(lf *Lockfile) (*Graph, error) {
 	if len(lf.Packages) == 0 {
-		return nil, fmt.Errorf("no packages found in lockfile (lockfileVersion %d)", lf.LockfileVersion)
+		return nil, lockfileEmptyError(lf)
 	}
 	g := &Graph{Nodes: map[string]*Node{}}
 
