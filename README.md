@@ -21,6 +21,9 @@ Atlas/
 └── main.go        # CLI & interactive REPL entrypoint
 ```
 
+<img width="861" height="983" alt="image" src="https://github.com/user-attachments/assets/a9352879-d68e-49f7-a81d-bb7068544252" />
+
+
 ## Parallel Multi-Agent Execution
 
 1. **Deterministic Foundation (`core/`)**:
