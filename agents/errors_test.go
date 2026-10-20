@@ -88,7 +88,7 @@ func lacks(t *testing.T, s string, bad ...string) {
 
 func contents404(repoStatus int) func(r *http.Request) *http.Response {
 	return func(r *http.Request) *http.Response {
-		if strings.HasSuffix(r.URL.Path, "/contents/package-lock.json") {
+		if strings.HasSuffix(r.URL.Path, "/contents/package-lock.json") || strings.HasSuffix(r.URL.Path, "/contents/poetry.lock") {
 			return resp(404, `{"message":"Not Found"}`, nil)
 		}
 		return resp(repoStatus, `{}`, nil)
@@ -121,8 +121,11 @@ func TestAnalyzeRepository_MissingLockfile_ReportedFactually_AndStops(t *testing
 			t.Errorf("unexpected downstream request %q", c)
 		}
 	}
-	if len(gh.Calls()) != 2 {
-		t.Errorf("want contents + repo probe only, got %v", gh.Calls())
+	// 2 calls per lockfile candidate (contents + repo probe on 404): Atlas
+	// also checks for poetry.lock before giving up, since neither is
+	// committed in this repo.
+	if len(gh.Calls()) != 4 {
+		t.Errorf("want contents + repo probe per lockfile candidate, got %v", gh.Calls())
 	}
 }
 

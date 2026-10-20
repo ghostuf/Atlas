@@ -156,7 +156,15 @@ func npmPublishStats(pj *npmPackument) (last time.Time, cadenceDays float64, mai
 }
 
 func resolveGithubRepo(pj *npmPackument) (owner, repo string, ok bool) {
-	raw := pj.Repository.URL
+	return ParseGithubURL(pj.Repository.URL)
+}
+
+// parseGithubURL extracts owner/repo from a raw repository URL string,
+// normalizing the common shorthand/prefix forms. Shared between npm's
+// repository.url and PyPI's project_urls (core/health_pypi.go) — both
+// occasionally use these same git+/git://  /git@ shorthand conventions, and
+// applying the normalization to a URL that doesn't use them is a no-op.
+func ParseGithubURL(raw string) (owner, repo string, ok bool) {
 	if raw == "" {
 		return "", "", false
 	}
@@ -409,7 +417,7 @@ func fetchOsvVulnDetail(id string) (*osvVulnDetail, error) {
 	return &d, nil
 }
 
-func osvBatchQueryChunk(targets []*Node) (map[string][]string, error) {
+func osvBatchQueryChunk(targets []*Node, osvEcosystem string) (map[string][]string, error) {
 	type query struct {
 		Package struct {
 			Name      string `json:"name"`
@@ -423,7 +431,7 @@ func osvBatchQueryChunk(targets []*Node) (map[string][]string, error) {
 	for _, n := range targets {
 		var q query
 		q.Package.Name = n.Name
-		q.Package.Ecosystem = "npm"
+		q.Package.Ecosystem = osvEcosystem
 		q.Version = n.Version
 		reqBody.Queries = append(reqBody.Queries, q)
 	}
@@ -461,7 +469,7 @@ func osvBatchQueryChunk(targets []*Node) (map[string][]string, error) {
 	return out, nil
 }
 
-func osvBatchQuery(targets []*Node) (map[string][]Advisory, error) {
+func osvBatchQuery(targets []*Node, osvEcosystem string) (map[string][]Advisory, error) {
 	idsByPkg := map[string][]string{}
 	const chunkSize = 1000
 	for start := 0; start < len(targets); start += chunkSize {
@@ -469,7 +477,7 @@ func osvBatchQuery(targets []*Node) (map[string][]Advisory, error) {
 		if end > len(targets) {
 			end = len(targets)
 		}
-		ids, err := osvBatchQueryChunk(targets[start:end])
+		ids, err := osvBatchQueryChunk(targets[start:end], osvEcosystem)
 		if err != nil {
 			return nil, err
 		}
@@ -604,28 +612,11 @@ func healthTargets(g *Graph, topN int) []*Node {
 	return targets
 }
 
-func fetchHealth(n *Node, advisories []Advisory) *Health {
-	h := &Health{Package: n.Name, Version: n.Version, Dev: n.Dev, Advisories: advisories}
-
-	pj, err := fetchNpmPackument(n.Name)
-	if err != nil {
-		h.Notes = append(h.Notes, err.Error())
-		h.Material = true
-		return h
-	}
-	h.LastPublish, h.PublishCadenceDays, h.MaintainerCount = npmPublishStats(pj)
-
-	if downloads, err := fetchNpmDownloads(n.Name); err != nil {
-		h.Notes = append(h.Notes, "npm downloads: "+err.Error())
-	} else {
-		h.WeeklyDownloads = downloads
-	}
-
-	owner, repo, ok := resolveGithubRepo(pj)
-	if !ok {
-		h.Notes = append(h.Notes, "no GitHub repository found")
-		return h
-	}
+// fillGithubSignals populates the GitHub-derived fields on h — last commit,
+// archived flag, open issue count, contributor count, bus factor. This is
+// 100% ecosystem-agnostic (just owner/repo in, GitHub API calls out), shared
+// by both the npm and PyPI registry paths so it's never duplicated.
+func FillGithubSignals(h *Health, owner, repo string) {
 	h.GithubRepo = owner + "/" + repo
 
 	if r, err := fetchGithubRepo(owner, repo); err != nil {
@@ -660,14 +651,42 @@ func fetchHealth(n *Node, advisories []Advisory) *Health {
 	} else {
 		h.TopContributor, h.BusFactor = computeBusFactor(stats, time.Now())
 	}
+}
+
+func fetchHealthNpm(n *Node, advisories []Advisory) *Health {
+	h := &Health{Package: n.Name, Version: n.Version, Dev: n.Dev, Advisories: advisories}
+
+	pj, err := fetchNpmPackument(n.Name)
+	if err != nil {
+		h.Notes = append(h.Notes, err.Error())
+		h.Material = true
+		return h
+	}
+	h.LastPublish, h.PublishCadenceDays, h.MaintainerCount = npmPublishStats(pj)
+
+	if downloads, err := fetchNpmDownloads(n.Name); err != nil {
+		h.Notes = append(h.Notes, "npm downloads: "+err.Error())
+	} else {
+		h.WeeklyDownloads = downloads
+	}
+
+	owner, repo, ok := resolveGithubRepo(pj)
+	if !ok {
+		h.Notes = append(h.Notes, "no GitHub repository found")
+		return h
+	}
+	FillGithubSignals(h, owner, repo)
 	return h
 }
 
-// RunHealth fetches health signals for dependencies concurrently.
-func RunHealth(g *Graph, topN int) []*Health {
+// RunHealth fetches health signals for dependencies concurrently. adapter
+// supplies the registry-specific fetch (npm registry, PyPI, ...) — pass
+// NpmAdapter{} for npm, or an ecosystem's own adapter (e.g. python.Adapter{})
+// for anything else; core never imports those packages directly.
+func RunHealth(g *Graph, topN int, adapter RegistryAdapter) []*Health {
 	targets := healthTargets(g, topN)
 
-	advisories, err := osvBatchQuery(targets)
+	advisories, err := osvBatchQuery(targets, g.Ecosystem.OSVEcosystem())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "osv.dev error:", err)
 		advisories = map[string][]Advisory{}
@@ -690,7 +709,7 @@ func RunHealth(g *Graph, topN int) []*Health {
 		go func(i int, n *Node) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			rows[i] = fetchHealth(n, advisories[n.Name])
+			rows[i] = adapter.FetchHealth(n, advisories[n.Name])
 		}(i, n)
 	}
 	wg.Wait()
@@ -767,7 +786,7 @@ func SplitHealthProblems(rows []*Health) (clean, problems []*Health) {
 }
 
 // PrintHealth renders the table of health signals to stdout and returns the string.
-func PrintHealth(rows []*Health) string {
+func PrintHealth(rows []*Health, eco Ecosystem) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n%-24s %-10s %-8s %-12s %-12s %-6s %-9s %-5s %-7s %s\n",
 		"PACKAGE", "VERSION", "DL/WK", "LAST PUBLISH", "LAST COMMIT", "CONTR", "BUSFACTOR", "ARCH", "ISSUES", "ADVISORIES")
@@ -783,9 +802,9 @@ func PrintHealth(rows []*Health) string {
 			fmt.Fprintf(&b, "  note: %s: %s\n", h.Package, note)
 		}
 	}
-	fmt.Fprintln(&b, "\nAdvisories above are scoped to your installed version via OSV.dev's version filter,"+
+	fmt.Fprintf(&b, "\nAdvisories above are scoped to your installed version via OSV.dev's version filter,"+
 		" but OSV can lag a freshly-published GHSA by a few hours. For anything you're about to act on,"+
-		" cross-check with `npm audit` or https://github.com/advisories before treating it as confirmed.")
+		" cross-check with %s or https://github.com/advisories before treating it as confirmed.\n", eco.AuditHint())
 	fmt.Fprintln(&b, "A high bus factor alone isn't a verdict: a package with few contributors and low downloads"+
 		" has nobody to pick it up if the maintainer stops, but the same bus factor on a package with a broad"+
 		" contributor base and heavy downloads usually gets a replacement maintainer or fork. Read bus factor,"+

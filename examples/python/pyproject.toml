@@ -1,0 +1,12 @@
+[tool.poetry]
+name = "atlas-poetry-example"
+version = "0.1.0"
+description = "Hand-written fixture for teaching/testing Atlas's Python (poetry) support."
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "2.31.0"
+PyYAML = "6.0.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "7.4.0"

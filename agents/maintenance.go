@@ -47,7 +47,7 @@ func (a *MaintenanceAgent) Analyze(ctx context.Context, c RiskCandidate) (*Maint
 		}
 
 		prompt := fmt.Sprintf(
-			"Analyze the maintenance sustainability and abandonment risk for npm package %q:\n"+
+			"Analyze the maintenance sustainability and abandonment risk for %s package %q:\n"+
 				"Archived status: %v\n"+
 				"Bus factor: %d%%\n"+
 				"Top contributor: %s\n"+
@@ -61,7 +61,7 @@ func (a *MaintenanceAgent) Analyze(ctx context.Context, c RiskCandidate) (*Maint
 				"A high bus factor on a package with few contributors and low downloads is a real risk. "+
 				"The same bus factor on a widely downloaded package with an active community is much less concerning. "+
 				"If the repo is archived, abandonment risk is critical.",
-			c.Package, c.Archived, busPct, c.Health.TopContributor, c.ContributorCount, c.WeeklyDownloads,
+			c.Ecosystem.DisplayName(), c.Package, c.Archived, busPct, c.Health.TopContributor, c.ContributorCount, c.WeeklyDownloads,
 			c.OpenIssues, core.DateOrDash(c.Health.LastCommit), core.DateOrDash(c.Health.LastPublish), c.BlastRadius,
 		)
 

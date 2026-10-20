@@ -1,10 +1,12 @@
 // Atlas: dependency graph analysis and multi-agent risk assessment.
+// Supports npm (package-lock.json) and Python/poetry (poetry.lock) projects.
 //
 // Usage:
 //
 //	go run . -repo expressjs/express            # fetches package-lock.json from default branch
 //	go run . -repo owner/repo -ref main -dir packages/app
-//	go run . -file ./package-lock.json          # local file
+//	go run . -file ./package-lock.json          # local npm lockfile
+//	go run . -file ./poetry.lock                # local poetry lockfile (needs sibling pyproject.toml)
 //	go run . -repo owner/repo -top 30
 //	go run .                                    # launches multi-agent interactive REPL
 package main
@@ -12,6 +14,7 @@ package main
 import (
 	"atlas/agents"
 	"atlas/core"
+	"atlas/core/python"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -27,14 +30,14 @@ func main() {
 
 	repo := flag.String("repo", "", "GitHub repo as owner/name")
 	ref := flag.String("ref", "", "branch, tag or sha (default: default branch)")
-	dir := flag.String("dir", "", "subdirectory containing package-lock.json (monorepos)")
-	file := flag.String("file", "", "local package-lock.json instead of fetching")
+	dir := flag.String("dir", "", "subdirectory containing the lockfile (monorepos)")
+	file := flag.String("file", "", "local lockfile (package-lock.json or poetry.lock) instead of fetching")
 	top := flag.Int("top", 25, "rows to print")
 	src := flag.String("src", "", "local source dir to scan for usage (default: shallow-clone -repo, or dir of -file)")
 	show := flag.String("show", "", "print sampled usage snippets for this package")
 	viz := flag.String("viz", "", "write an interactive HTML graph to this file, e.g. graph.html")
 	vizMax := flag.Int("viz-max", 150, "max nodes in the visualization (root + direct deps always included)")
-	health := flag.Bool("health", true, "fetch dependency health signals (npm registry, GitHub, OSV.dev); -health=false to skip")
+	health := flag.Bool("health", true, "fetch dependency health signals (package registry, GitHub, OSV.dev); -health=false to skip")
 	healthTop := flag.Int("health-top", 0, "also check this many additional packages by blast-radius rank")
 	healthJSON := flag.String("health-json", "", "write the health report as JSON to this path")
 	model := flag.String("model", "gemma4:e4b", "Ollama model to use for the interactive agent (used when no -repo/-file is given)")
@@ -101,40 +104,54 @@ func main() {
 	}
 
 	var data []byte
+	var lockName string
 	var err error
 	switch {
 	case *file != "":
 		data, err = core.ReadLocalFile(*file, "lockfile")
+		lockName = filepath.Base(*file)
 	case *repo != "":
-		data, err = core.FetchFile(*repo, *ref, *dir, "package-lock.json")
+		data, lockName, err = core.FetchLockfile(*repo, *ref, *dir)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, core.FormatError(err))
 		os.Exit(1)
 	}
 
-	var lf core.Lockfile
-	if err := json.Unmarshal(data, &lf); err != nil {
-		src := "package-lock.json from " + *repo
-		if *file != "" {
-			src = *file
-		}
-		fmt.Fprintln(os.Stderr, core.FormatError(core.LockfileParseError(err, src)))
-		os.Exit(1)
-	}
-	if len(lf.Packages) == 0 && len(lf.V1Deps) > 0 {
-		pj, err := core.LoadPackageJSON(*repo, *ref, *dir, *file)
+	var g *core.Graph
+	var adapter core.EcosystemAdapter = core.NpmAdapter{}
+	switch core.DetectEcosystem(lockName) {
+	case core.EcosystemPoetry:
+		adapter = python.Adapter{}
+		g, err = python.BuildPoetryGraph(data, *repo, *ref, *dir, *file)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, core.FormatError(core.Annotate(err,
-				"This is a version 1 lockfile, which does not list the project's direct dependencies, so Atlas also needs its package.json.")))
+			fmt.Fprintln(os.Stderr, core.FormatError(err))
 			os.Exit(1)
 		}
-		core.ConvertV1(&lf, pj)
-	}
-	g, err := core.BuildGraph(&lf)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, core.FormatError(err))
-		os.Exit(1)
+	default:
+		var lf core.Lockfile
+		if err := json.Unmarshal(data, &lf); err != nil {
+			src := "package-lock.json from " + *repo
+			if *file != "" {
+				src = *file
+			}
+			fmt.Fprintln(os.Stderr, core.FormatError(core.LockfileParseError(err, src)))
+			os.Exit(1)
+		}
+		if len(lf.Packages) == 0 && len(lf.V1Deps) > 0 {
+			pj, err := core.LoadPackageJSON(*repo, *ref, *dir, *file)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, core.FormatError(core.Annotate(err,
+					"This is a version 1 lockfile, which does not list the project's direct dependencies, so Atlas also needs its package.json.")))
+				os.Exit(1)
+			}
+			core.ConvertV1(&lf, pj)
+		}
+		g, err = core.BuildGraph(&lf)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, core.FormatError(err))
+			os.Exit(1)
+		}
 	}
 
 	fmt.Print(core.GraphReport(g, *top))
@@ -148,8 +165,8 @@ func main() {
 	}
 
 	if *health {
-		rows := core.RunHealth(g, *healthTop)
-		core.PrintHealth(rows)
+		rows := core.RunHealth(g, *healthTop, adapter)
+		core.PrintHealth(rows, g.Ecosystem)
 		if *healthJSON != "" {
 			if err := core.WriteHealthJSON(rows, *healthJSON); err != nil {
 				fmt.Fprintln(os.Stderr, "health json error:", err)
@@ -172,6 +189,6 @@ func main() {
 		srcDir = filepath.Dir(*file)
 	}
 	if srcDir != "" {
-		core.RunScan(g, srcDir, *show, true)
+		core.RunScan(g, srcDir, *show, true, adapter)
 	}
 }

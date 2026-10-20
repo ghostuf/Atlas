@@ -42,10 +42,10 @@ func (a *RemediationAgent) Synthesize(
 	if c.Classification == core.ClassUnusedCandidate {
 		return &RemediationPlan{
 			Package:         c.Package,
-			SuggestedFix:    fmt.Sprintf("Remove %q from package.json dependencies — zero source or config references found.", c.Package),
+			SuggestedFix:    fmt.Sprintf("Remove %q from %s — zero source or config references found.", c.Package, c.Ecosystem.ManifestName()),
 			AlternativeLibs: nil,
 			MigrationEffort: "trivial",
-			ActionRequired:  fmt.Sprintf("Run: npm uninstall %s", c.Package),
+			ActionRequired:  fmt.Sprintf("Run: %s", c.Ecosystem.RemoveCommand(c.Package)),
 		}, nil
 	}
 
@@ -84,7 +84,7 @@ func (a *RemediationAgent) Synthesize(
 		}
 
 		prompt := fmt.Sprintf(
-			"Synthesize a concrete remediation and migration plan for npm package %q:\n"+
+			"Synthesize a concrete remediation and migration plan for %s package %q:\n"+
 				"Installed version: %s\n"+
 				"Fixed versions published: %s\n"+
 				"Architectural coupling: %s\n"+
@@ -92,7 +92,7 @@ func (a *RemediationAgent) Synthesize(
 				"Maintenance sustainability: %s\n"+
 				"Where used in project: %s\n\n"+
 				"Provide a concrete fix, recommend 1-3 modern alternatives or native APIs, determine migration effort, and state the exact action required.",
-			c.Package, c.Version, strings.Join(fixedVersions, ", "), couplingInfo, vulnInfo, maintInfo, c.UsedIn,
+			c.Ecosystem.DisplayName(), c.Package, c.Version, strings.Join(fixedVersions, ", "), couplingInfo, vulnInfo, maintInfo, c.UsedIn,
 		)
 
 		var respText string
@@ -121,7 +121,7 @@ func (a *RemediationAgent) Synthesize(
 	if len(fixedVersions) > 0 {
 		plan.SuggestedFix = fmt.Sprintf("Upgrade %s to version %s to resolve open advisories.", c.Package, fixedVersions[len(fixedVersions)-1])
 		plan.MigrationEffort = "trivial"
-		plan.ActionRequired = fmt.Sprintf("Run: npm install %s@%s", c.Package, fixedVersions[len(fixedVersions)-1])
+		plan.ActionRequired = fmt.Sprintf("Run: %s", c.Ecosystem.InstallCommand(c.Package, fixedVersions[len(fixedVersions)-1]))
 	} else if c.Archived {
 		plan.SuggestedFix = fmt.Sprintf("Package %s is archived upstream. Migrate to an actively maintained alternative.", c.Package)
 		plan.MigrationEffort = "architectural_refactor"

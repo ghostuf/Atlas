@@ -21,9 +21,15 @@ import (
 //	require('pkg')           import('pkg')
 var importRe = regexp.MustCompile(`(?:\bfrom\s+|\bimport\s+|\brequire\s*\(\s*|\bimport\s*\(\s*)['"]([^'"]+)['"]`)
 
+// skipDirs, configFileNames get every ecosystem's entries added
+// unconditionally (harmless no-ops in an npm project, say) — only
+// SrcExts()/ImportCandidates() (per-ecosystem, via EcosystemAdapter) need
+// real dispatch, since those determine what counts as "source" at all, and
+// a .py file in an npm project should NOT be treated as JS source.
 var skipDirs = map[string]bool{
 	"node_modules": true, ".git": true, "dist": true, "build": true,
 	"coverage": true, "vendor": true, ".next": true, "out": true,
+	"__pycache__": true, ".venv": true, "venv": true, ".tox": true,
 }
 
 var srcExts = map[string]bool{
@@ -42,6 +48,11 @@ var configFileNames = map[string]bool{
 	".stylelintrc.json":  true,
 	".commitlintrc":      true,
 	".commitlintrc.json": true,
+	"pyproject.toml":     true,
+	"setup.cfg":          true,
+	"tox.ini":            true,
+	"Pipfile":            true,
+	".flake8":            true,
 }
 
 var packageJSONDepKeys = []string{
@@ -125,6 +136,9 @@ func stripComments(name string, lines []string) []string {
 		return stripYAMLComments(lines)
 	case strings.HasSuffix(lower, ".json"):
 		return lines
+	case strings.HasSuffix(lower, ".py") || strings.HasSuffix(lower, ".toml") ||
+		strings.HasSuffix(lower, ".cfg") || strings.HasSuffix(lower, ".ini"):
+		return stripHashComments(lines)
 	default:
 		return stripJSComments(lines)
 	}
@@ -184,12 +198,19 @@ func stripYAMLComments(lines []string) []string {
 	return out
 }
 
+// stripHashComments does a naive '#'-to-EOL strip — identical shape to
+// stripYAMLComments, used for Python/TOML/ini-style files instead. Generic
+// enough to live here rather than in an ecosystem-specific package.
+func stripHashComments(lines []string) []string {
+	return stripYAMLComments(lines)
+}
+
 func isIdentChar(b byte) bool {
 	return b == '_' || b == '.' ||
 		('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z') || ('0' <= b && b <= '9')
 }
 
-func containsWholeToken(line, name string) bool {
+func ContainsWholeToken(line, name string) bool {
 	if name == "" {
 		return false
 	}
@@ -249,22 +270,24 @@ func getOrCreateUsage(usage map[string]*Usage, pkg string) *Usage {
 	return u
 }
 
-func scanDir(root string, wanted map[string]bool) (map[string]*Usage, int, error) {
+func scanDir(root string, wanted map[string]bool, adapter EcosystemAdapter) (map[string]*Usage, int, error) {
 	usage := map[string]*Usage{}
 	scanned := 0
+	curSrcExts := adapter.SrcExts()
+	resolve := adapter.NewResolver(wanted)
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if d.IsDir() {
-			if skipDirs[d.Name()] && path != root {
+			if path != root && (skipDirs[d.Name()] || strings.HasSuffix(d.Name(), ".egg-info")) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))
-		isSrc := srcExts[ext]
+		isSrc := curSrcExts[ext]
 		isConfig := isConfigFile(d.Name())
 		if !isSrc && !isConfig {
 			return nil
@@ -292,9 +315,9 @@ func scanDir(root string, wanted map[string]bool) (map[string]*Usage, int, error
 
 		if isSrc {
 			for i, line := range stripped {
-				for _, m := range importRe.FindAllStringSubmatch(line, -1) {
-					pkg, ok := pkgFromSpecifier(m[1])
-					if !ok || !wanted[pkg] {
+				for _, cand := range adapter.ImportCandidates(line) {
+					pkg, ok := resolve(cand)
+					if !ok {
 						continue
 					}
 					u := getOrCreateUsage(usage, pkg)
@@ -318,8 +341,7 @@ func scanDir(root string, wanted map[string]bool) (map[string]*Usage, int, error
 		}
 
 		configStripped := stripped
-		if d.Name() == "package.json" {
-			cleaned := packageJSONSearchText(data)
+		if cleaned, ok := adapter.ManifestSearchText(d.Name(), data); ok {
 			if cleaned == "" {
 				configStripped = nil
 			} else {
@@ -332,7 +354,7 @@ func scanDir(root string, wanted map[string]bool) (map[string]*Usage, int, error
 				continue
 			}
 			for _, line := range configStripped {
-				if containsWholeToken(line, pkg) {
+				if ContainsWholeToken(line, pkg) {
 					getOrCreateUsage(usage, pkg).ConfigFiles[rel] = true
 					break
 				}
@@ -389,15 +411,18 @@ type UsageScan struct {
 	Root    string
 }
 
-// RunScan builds the usage report as text and returns both the text and structured data.
-func RunScan(g *Graph, root, show string, print bool) (string, UsageScan) {
+// RunScan builds the usage report as text and returns both the text and
+// structured data. adapter supplies the ecosystem-specific scan rules — pass
+// NpmAdapter{} for npm, or an ecosystem's own adapter (e.g. python.Adapter{})
+// for anything else; core never imports those packages directly.
+func RunScan(g *Graph, root, show string, print bool, adapter EcosystemAdapter) (string, UsageScan) {
 	wanted := map[string]bool{}
 	for _, n := range g.Nodes {
 		if n.Direct {
 			wanted[n.Name] = true
 		}
 	}
-	usage, scanned, err := scanDir(root, wanted)
+	usage, scanned, err := scanDir(root, wanted, adapter)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scan error:", err)
 		return "", UsageScan{}
@@ -424,7 +449,7 @@ func RunScan(g *Graph, root, show string, print bool) (string, UsageScan) {
 			Trunc(u.Package, 32), len(u.ProdFiles), len(u.TestFiles), len(u.ConfigFiles), len(u.Dirs), len(u.Sites), SortedKeys(u.Tags))
 	}
 	fmt.Fprintf(&b, "\nCONFIG_REFS: the package name was found as a plain string in a config file "+
-		"(package.json, .eslintrc, etc.), not a parsed import — weaker evidence than PROD_FILES/TEST_FILES, "+
+		"(package.json, pyproject.toml, .eslintrc, etc.), not a parsed import — weaker evidence than PROD_FILES/TEST_FILES, "+
 		"but still a real signal for build-tool plugins loaded by convention (e.g. Grunt, ESLint, Babel).\n")
 
 	var unused []string

@@ -119,7 +119,7 @@ func CollectRisks(health []*core.Health, usageRows []*core.Usage, g *core.Graph)
 			adv := h.Advisories[i]
 			eff := blendSeverity(adv.Severity, class)
 			r := IssueableRisk{
-				Package: h.Package, Version: h.Version,
+				Package: h.Package, Version: h.Version, Ecosystem: g.Ecosystem,
 				Classification: class, Advisory: &h.Advisories[i],
 				Health: h, Usage: u, UsedIn: used,
 				BlastRadius: blast, RiskType: "advisory", EffectiveSev: eff,
@@ -132,7 +132,7 @@ func CollectRisks(health []*core.Health, usageRows []*core.Usage, g *core.Graph)
 		// --- archived ---
 		if h.Archived {
 			r := IssueableRisk{
-				Package: h.Package, Version: h.Version,
+				Package: h.Package, Version: h.Version, Ecosystem: g.Ecosystem,
 				Classification: class, Health: h, Usage: u, UsedIn: used,
 				BlastRadius: blast, RiskType: "archived", EffectiveSev: SeverityHigh,
 			}
@@ -144,7 +144,7 @@ func CollectRisks(health []*core.Health, usageRows []*core.Usage, g *core.Graph)
 		// --- abandonment ---
 		if core.IsAbandonmentRisk(h) {
 			r := IssueableRisk{
-				Package: h.Package, Version: h.Version,
+				Package: h.Package, Version: h.Version, Ecosystem: g.Ecosystem,
 				Classification: class, Health: h, Usage: u, UsedIn: used,
 				BlastRadius: blast, RiskType: "abandonment", EffectiveSev: SeverityModerate,
 			}
@@ -338,9 +338,9 @@ func renderRemediation(r IssueableRisk) string {
 		if len(adv.FixedIn) > 0 {
 			return fmt.Sprintf(
 				"1. **Upgrade `%s`** to version `%s` or later — this is the version OSV lists as patched.\n"+
-					"2. Run `npm audit` after upgrading to confirm no remaining advisories.\n"+
+					"2. Run %s after upgrading to confirm no remaining advisories.\n"+
 					"3. Review all usage sites listed above and verify the new version's API is compatible.",
-				r.Package, adv.FixedIn[0])
+				r.Package, adv.FixedIn[0], r.Ecosystem.AuditHint())
 		}
 		return fmt.Sprintf(
 			"1. **No patch is currently available** for `%s` (%s).\n"+
@@ -352,10 +352,10 @@ func renderRemediation(r IssueableRisk) string {
 	case "archived":
 		return fmt.Sprintf(
 			"1. **Plan a migration away from `%s`** — the repository is archived and will receive no further updates.\n"+
-				"2. Identify an actively maintained alternative (check npm's \"similar packages\" or search GitHub).\n"+
+				"2. Identify an actively maintained alternative (check %s's registry page or search GitHub).\n"+
 				"3. Prioritize migration based on how deeply the package is used (see blast radius above).\n"+
-				"4. In the meantime, pin the current version and monitor for security advisories via `npm audit`.",
-			r.Package)
+				"4. In the meantime, pin the current version and monitor for security advisories via %s.",
+			r.Package, r.Ecosystem.RegistryName(), r.Ecosystem.AuditHint())
 
 	case "abandonment":
 		return fmt.Sprintf(
@@ -379,7 +379,7 @@ func renderReferences(r IssueableRisk) []string {
 	if r.Health.GithubRepo != "" {
 		refs = append(refs, fmt.Sprintf("Package repo: https://github.com/%s", r.Health.GithubRepo))
 	}
-	refs = append(refs, fmt.Sprintf("npm registry: https://www.npmjs.com/package/%s", url.PathEscape(r.Package)))
+	refs = append(refs, fmt.Sprintf("%s registry: %s", r.Ecosystem.RegistryName(), r.Ecosystem.RegistryLink(url.PathEscape(r.Package))))
 	return refs
 }
 

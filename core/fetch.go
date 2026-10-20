@@ -43,6 +43,7 @@ func FetchFile(repo, ref, dir, name string) ([]byte, error) {
 	}
 	switch {
 	case r.Status == http.StatusOK:
+		// fall through to decode body below
 	case r.Status == http.StatusNotFound:
 		return nil, diagnose404(repo, userRef, dir, name, path)
 	default:
@@ -99,6 +100,37 @@ func FetchFile(repo, ref, dir, name string) ([]byte, error) {
 			Doing: doing,
 		}
 	}
+}
+
+// LockfileCandidates are the lockfile names FetchLockfile tries, in order,
+// to auto-detect a repo's ecosystem.
+var LockfileCandidates = []string{"package-lock.json", "poetry.lock"}
+
+// FetchLockfile tries each candidate lockfile name in turn, only advancing to
+// the next one when FetchFile's error says the file genuinely doesn't exist
+// at this ref (ErrFileNotFound) — any other failure (rate limit, auth,
+// network error, or the repository itself not being found/visible) returns
+// immediately so it's never misattributed as "none of these lockfiles exist
+// here."
+func FetchLockfile(repo, ref, dir string) (data []byte, name string, err error) {
+	// The first candidate's "not found" error is returned if every candidate
+	// is missing: it's the richest, most specific diagnosis (npm remains the
+	// primary/default ecosystem), not a synthesized combined message.
+	var firstNotFound error
+	for _, candidate := range LockfileCandidates {
+		data, err = FetchFile(repo, ref, dir, candidate)
+		if err == nil {
+			return data, candidate, nil
+		}
+		var typed *Error
+		if !errors.As(err, &typed) || typed.Kind != ErrFileNotFound {
+			return nil, "", err
+		}
+		if firstNotFound == nil {
+			firstNotFound = err
+		}
+	}
+	return nil, "", firstNotFound
 }
 
 // CloneRepo shallow-clones github.com/<repo> into a temp dir (needs git installed).
