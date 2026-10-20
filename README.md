@@ -1,3 +1,6 @@
+<img width="1280" height="640" alt="Atlas" src="https://github.com/user-attachments/assets/b8b96783-5833-4121-9b6d-f0b747dd3ba7" />
+
+
 # ATLAS : Dependency Mapper & Multi-Agent Risk Analyzer
 **Srijan Dahal, Parth Poudyal, Arun Mainali, Suprit Phuyal** <br>
 *Frogtober Fest 2026*  
