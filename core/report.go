@@ -610,7 +610,7 @@ tr.flagged td { background: rgba(255, 77, 79, 0.18); color: #ffece8; }
 <td>{{.Contributors}}</td><td>{{.BusFactor}}</td>
 <td>{{if .Archived}}<span class="yes-bad">yes</span>{{else}}<span class="muted">no</span>{{end}}</td>
 <td>{{.OpenIssues}}</td>
-<td>{{if eq .Classification "unused-candidate"}}<span class="status-dot" style="background:var(--error)"></span>Unused &mdash; consider removing
+<td>{{if eq .Classification "unused-candidate"}}<span class="status-dot" style="background:var(--error)"></span><span class="yes-bad">Unused &mdash; consider removing</span>
 {{- else if eq .Classification "build-tooling"}}Build tooling (dev dep)
 {{- else if eq .Classification "config-referenced"}}Config-referenced
 {{- else if eq .Classification "test-only"}}Test-only
