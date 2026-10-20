@@ -6,45 +6,27 @@
 *Frogtober Fest 2026*  
 
 ## Overview
-Atlas is a multi-agent dependency risk analyzer that maps architectural coupling, blast radius, maintainer sustainability, and security vulnerabilities across chained npm dependencies.
+Atlas is a multi-agent dependency risk analyzer. It maps architectural coupling, blast radius, maintainer sustainability, and security vulnerabilities across a project's dependency graph. It supports npm (`package-lock.json`) and Python/Poetry (`poetry.lock`) projects. Ecosystem support is adapter-based, so adding a third package manager means writing a new adapter, not rewriting the pipeline.
 
 ## Architecture
 
-Atlas decouples deterministic pipeline analysis from AI agent operations, running specialist agents concurrently:
+Atlas separates deterministic pipeline analysis from AI agent operations and runs specialist agents concurrently. Ecosystem-specific logic lives behind a small `EcosystemAdapter` interface (`core/adapter.go`), so `core` never depends on a particular package manager directly. `core/python` is a self-contained plug-in, not a special case inside `core`.
 
 ```
 Atlas/
-├── agents/                     # Multi-Agent Parallel Runtime
-│   ├── types.go                # Agent interface, context, and structured assessment schemas
-│   ├── pool.go                 # Concurrency limiter, semaphore & parallel worker runner
-│   ├── orchestrator.go         # Generalist Orchestrator Agent (pipeline & parallel coordination)
-│   ├── coupling.go             # Architectural Coupling Agent (surface vs load-bearing depth)
-│   ├── vulnerability.go        # Vulnerability Risk Agent (contextual exploitability)
-│   ├── maintenance.go          # Maintainer & Abandonment Agent (bus-factor & sustainability)
-│   ├── remediation.go          # Remediation Agent (concrete migration & mitigation plans)
-│   └── action.go               # Downstream Action Agent (concurrent dedup & rate-limited issue dispatch)
-├── core/                       # Deterministic Signals & Data Pipeline
-│   ├── graph.go                # Dependency graph G=(V,E), BFS metrics, blast radius
-│   ├── scan.go                 # Static AST/regex usage scanning, prod vs test classification
-│   ├── health.go               # npm registry, GitHub API, OSV.dev advisories
-│   ├── score.go                # Deterministic repository health scoring
-│   ├── report.go               # Comprehensive HTML report generator
-│   ├── viz.go                  # Interactive D3/HTML graph visualization
-│   ├── gauge.go                # SVG score gauge generator
-│   ├── fetch.go                # GitHub file fetching & shallow cloning
-│   ├── lockv1.go               # npm lockfile v1 conversion
-│   ├── ollama.go               # Ollama client with tools & schema-constrained JSON
-│   ├── spinner.go              # CLI terminal animated spinners
-│   └── env.go                  # .env file loader
-└── main.go                     # CLI & Interactive REPL entrypoint
+├── agents/        # Multi-agent runtime: Orchestrator + 4 specialist agents + Action agent
+├── core/          # Deterministic pipeline: graph, scan, health, scoring, report, errors (npm-native)
+│   └── python/    # Python/Poetry ecosystem plug-in, implementing core's EcosystemAdapter
+├── examples/      # Hand-written teaching/test fixtures (npm and Python)
+└── main.go        # CLI & interactive REPL entrypoint
 ```
 
 ## Parallel Multi-Agent Execution
 
 1. **Deterministic Foundation (`core/`)**:
-   - Parses `package-lock.json`, computes transitive reachability (blast radius), and builds an interactive visualization.
-   - Statically scans source code to categorize dependencies into `runtime`, `test-only`, `config-referenced`, `build-tooling`, and `unused-candidate`.
-   - Fetches registry metadata, commit activity, bus factor, and OSV.dev vulnerability advisories.
+   - Detects the ecosystem from the lockfile (`package-lock.json` → npm, `poetry.lock` → Python/Poetry, trying both when fetching from a `-repo`), parses it, computes transitive reachability (blast radius), and builds an interactive visualization.
+   - Statically scans source code (JS/TS imports, or Python `import`/`from` statements) to categorize dependencies into `runtime`, `test-only`, `config-referenced`, `build-tooling`, and `unused-candidate`.
+   - Fetches registry metadata (npm registry or PyPI), commit activity, bus factor, and OSV.dev vulnerability advisories.
 
 2. **Parallel Specialist Agents (`agents/`)**:
    - High-risk candidate dependencies are analyzed simultaneously across 4 specialized agents using bounded concurrency:
@@ -63,11 +45,14 @@ Atlas/
 # Run multi-agent interactive REPL mode (requires Ollama)
 go run .
 
-# Run one-shot CLI analysis on a GitHub repository
+# Run one-shot CLI analysis on a GitHub repository (tries package-lock.json, then poetry.lock)
 go run . -repo owner/repo
 
-# Run one-shot analysis on a local lockfile
-go run . -file ./package-lock.json
+# Run one-shot analysis on a local npm lockfile
+go run . -file ./examples/package-lock.json
+
+# Run one-shot analysis on a local Poetry lockfile (needs a sibling pyproject.toml)
+go run . -file ./examples/python/poetry.lock
 
 # Run unit tests
 go test -v ./...
