@@ -37,6 +37,9 @@ func HttpGet(u string, headers map[string]string) ([]byte, int, error) {
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	// PERF: (arun) Maybe we could share a single `http.Client` for many requests.
+	// PERF: This may save TLS handshake overhead which currently blocks the program
+	// PERF: for a cumulative total of 6.83 seconds (kind of, maybe).
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -254,7 +257,7 @@ func parseLastPage(linkHeader string) (int, error) {
 }
 
 type contributorWeek struct {
-	Week int `json:"w"`
+	Week    int `json:"w"`
 	Commits int `json:"c"`
 }
 
@@ -262,7 +265,7 @@ type contributorStat struct {
 	Author struct {
 		Login string `json:"login"`
 	} `json:"author"`
-	Total int `json:"total"`
+	Total int               `json:"total"`
 	Weeks []contributorWeek `json:"weeks"`
 }
 
@@ -453,6 +456,8 @@ func osvBatchQuery(targets []*Node) (map[string][]Advisory, error) {
 		}
 	}
 
+	// PERF: (arun) OSV detail queries are currently serial HTTP chains. There is a huge performance
+	// PERF: bottleneck here. Parallel requests should be tried out.
 	details := map[string]*osvVulnDetail{}
 	for _, ids := range idsByPkg {
 		for _, id := range ids {
@@ -626,6 +631,7 @@ func RunHealth(g *Graph, topN int) []*Health {
 	}
 
 	rows := make([]*Health, len(targets))
+	// PERF: Why is maxConcurrency only 5?
 	const maxConcurrency = 5
 	sem := make(chan struct{}, maxConcurrency)
 	var wg sync.WaitGroup

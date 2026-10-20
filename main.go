@@ -1,6 +1,7 @@
 // Atlas: dependency graph analysis and multi-agent risk assessment.
 //
 // Usage:
+//
 //	go run . -repo expressjs/express            # fetches package-lock.json from default branch
 //	go run . -repo owner/repo -ref main -dir packages/app
 //	go run . -file ./package-lock.json          # local file

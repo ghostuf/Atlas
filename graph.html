@@ -1,0 +1,861 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atlas — Dependency Constellation Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lexend+Deca:wght@300;400;500;600&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0c0c0c;
+  --sub-alt: #121212;
+  --sub: #404040;
+  --text: #d3c2c3;
+  --caret: #bebebe;
+  --main: #b7976a;
+  --main-hover: #c1a174;
+  --error: #ff4d4f;
+  --error-extra: #ff7875;
+  --warning: #b7976a;
+
+  --text-muted: #bfbfbf;
+  --radius: 8px;
+  --radius-sm: 4px;
+  --transition: 150ms ease;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: none;
+}
+#canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+#canvas:active { cursor: grabbing; }
+
+/* Modern iv_spade Observatory Panel */
+#hud {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  width: 320px;
+  background: var(--sub-alt);
+  border: 1px solid var(--sub);
+  border-radius: var(--radius);
+  padding: 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+  z-index: 10;
+}
+.hud-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.hud-icon {
+  font-size: 15px;
+  color: var(--main);
+}
+.hud-title {
+  font-family: "Lexend Deca", sans-serif;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0;
+}
+.hud-meta {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+  margin-bottom: 12px;
+}
+
+/* Search Box */
+.search-box {
+  position: relative;
+  margin-bottom: 12px;
+}
+#search {
+  width: 100%;
+  padding: 8px 12px 8px 32px;
+  background: var(--bg);
+  border: 1px solid var(--sub);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: "Roboto Mono", monospace;
+  font-size: 12px;
+  caret-color: var(--caret);
+  outline: none;
+  transition: border-color var(--transition);
+}
+#search:focus {
+  border-color: var(--main);
+}
+.search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  color: var(--sub);
+  pointer-events: none;
+}
+
+/* Legend */
+.legend {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--sub);
+  font-family: "Lexend Deca", sans-serif;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.star-pip {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+/* Package Details */
+#stellar-info {
+  font-size: 12.5px;
+}
+.stellar-name {
+  font-family: "Roboto Mono", monospace;
+  font-weight: 500;
+  font-size: 13.5px;
+  color: var(--text);
+  word-break: break-all;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.stellar-badge {
+  font-family: "Roboto Mono", monospace;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  text-transform: lowercase;
+}
+.badge-root { background: rgba(183, 151, 106, 0.15); color: var(--main); border: 1px solid rgba(183, 151, 106, 0.35); }
+.badge-direct { background: rgba(211, 194, 195, 0.15); color: var(--text); border: 1px solid rgba(211, 194, 195, 0.35); }
+.badge-trans { background: rgba(64, 64, 64, 0.25); color: #8e8e8e; border: 1px solid var(--sub); }
+.badge-hot { background: rgba(157, 123, 125, 0.2); color: var(--error); border: 1px solid rgba(157, 123, 125, 0.4); }
+
+.stellar-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.stellar-row b {
+  color: var(--main);
+  font-weight: 500;
+}
+.hud-hint {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+  font-style: italic;
+  opacity: 0.85;
+}
+
+/* Controls */
+#controls {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 10;
+}
+.control-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius);
+  background: var(--sub-alt);
+  border: 1px solid var(--sub);
+  color: var(--text);
+  font-family: "Lexend Deca", sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  cursor: pointer;
+  outline: none;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.control-btn:hover {
+  background: var(--main);
+  color: var(--bg);
+  border-color: var(--main);
+}
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<div id="hud">
+  <div class="hud-header">
+    <span class="hud-icon">✧</span>
+    <h1 class="hud-title">constellation map</h1>
+  </div>
+  <div class="hud-meta" id="hud-meta"></div>
+
+  <div class="search-box">
+    <span class="search-icon">🔍</span>
+    <input id="search" type="search" placeholder="search package..." autocomplete="off">
+  </div>
+
+  <div class="legend">
+    <div class="legend-item"><span class="star-pip" style="background:#b7976a;"></span>app root</div>
+    <div class="legend-item"><span class="star-pip" style="background:#d3c2c3;"></span>direct dep</div>
+    <div class="legend-item"><span class="star-pip" style="background:#404040;"></span>transitive</div>
+    <div class="legend-item"><span class="star-pip" style="background:#ff4d4f;"></span>high blast</div>
+  </div>
+
+  <div id="stellar-info"></div>
+</div>
+
+<div id="controls">
+  <button class="control-btn" id="btn-recenter" title="Recenter Observatory on App Root">⊙</button>
+  <button class="control-btn" id="btn-zoom-in" title="Zoom In">+</button>
+  <button class="control-btn" id="btn-zoom-out" title="Zoom Out">−</button>
+</div>
+
+<script>
+(function(){
+var DATA = {"title":"root","total":769,"nodes":[{"name":"root","version":"","depth":0,"direct":false,"root":true,"dev":false,"dependents":0,"transitive":0},{"name":"lerna","version":"3.22.1","depth":1,"direct":true,"root":false,"dev":true,"dependents":1,"transitive":0},{"name":"inherits","version":"2.0.4","depth":5,"direct":false,"root":false,"dev":true,"dependents":14,"transitive":96},{"name":"isarray","version":"1.0.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":93},{"name":"safe-buffer","version":"5.1.2","depth":6,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":91},{"name":"string_decoder","version":"1.1.1","depth":5,"direct":false,"root":false,"dev":true,"dependents":5,"transitive":90},{"name":"util-deprecate","version":"1.0.2","depth":5,"direct":false,"root":false,"dev":true,"dependents":5,"transitive":90},{"name":"core-util-is","version":"1.0.2","depth":5,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":84},{"name":"signal-exit","version":"3.0.3","depth":4,"direct":false,"root":false,"dev":true,"dependents":6,"transitive":81},{"name":"process-nextick-args","version":"2.0.1","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":80},{"name":"safe-buffer","version":"5.1.2","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":80},{"name":"readable-stream","version":"2.3.7","depth":4,"direct":false,"root":false,"dev":true,"dependents":9,"transitive":79},{"name":"graceful-fs","version":"4.2.6","depth":4,"direct":false,"root":false,"dev":true,"dependents":16,"transitive":70},{"name":"wrappy","version":"1.0.2","depth":6,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":70},{"name":"once","version":"1.4.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":10,"transitive":68},{"name":"aproba","version":"1.2.0","depth":4,"direct":false,"root":false,"dev":true,"dependents":4,"transitive":65},{"name":"minimist","version":"1.2.5","depth":5,"direct":false,"root":false,"dev":true,"dependents":7,"transitive":63},{"name":"number-is-nan","version":"1.0.1","depth":6,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":63},{"name":"object-assign","version":"4.1.1","depth":4,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":61},{"name":"ansi-regex","version":"2.1.1","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":60},{"name":"strip-ansi","version":"3.0.1","depth":4,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":59},{"name":"code-point-at","version":"1.1.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":58},{"name":"is-fullwidth-code-point","version":"1.0.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":58},{"name":"string-width","version":"1.0.2","depth":4,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":57},{"name":"console-control-strings","version":"1.1.0","depth":3,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":56},{"name":"delegates","version":"1.0.0","depth":4,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":56},{"name":"has-unicode","version":"2.0.1","depth":4,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":56},{"name":"set-blocking","version":"2.0.0","depth":3,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":56},{"name":"wide-align","version":"1.1.3","depth":4,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":56},{"name":"are-we-there-yet","version":"1.1.5","depth":3,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":55},{"name":"gauge","version":"2.7.4","depth":3,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":55},{"name":"is-buffer","version":"1.1.6","depth":10,"direct":false,"root":false,"dev":true,"dependents":7,"transitive":54},{"name":"kind-of","version":"6.0.3","depth":5,"direct":false,"root":false,"dev":true,"dependents":17,"transitive":54},{"name":"npmlog","version":"4.1.2","depth":2,"direct":false,"root":false,"dev":true,"dependents":35,"transitive":54},{"name":"hosted-git-info","version":"2.8.8","depth":4,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":53},{"name":"color-name","version":"1.1.3","depth":6,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":52},{"name":"color-convert","version":"1.9.3","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":51},{"name":"ansi-styles","version":"3.2.1","depth":4,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":50},{"name":"end-of-stream","version":"1.4.4","depth":5,"direct":false,"root":false,"dev":true,"dependents":5,"transitive":49},{"name":"is-arrayish","version":"0.2.1","depth":6,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":49},{"name":"error-ex","version":"1.3.2","depth":5,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":48},{"name":"isobject","version":"3.0.1","depth":6,"direct":false,"root":false,"dev":true,"dependents":11,"transitive":48},{"name":"balanced-match","version":"1.0.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":47},{"name":"concat-map","version":"0.0.1","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":47},{"name":"escape-string-regexp","version":"1.0.5","depth":4,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":47},{"name":"has-flag","version":"3.0.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":47},{"name":"os-tmpdir","version":"1.0.2","depth":5,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":47},{"name":"brace-expansion","version":"1.1.11","depth":4,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":46},{"name":"function-bind","version":"1.1.1","depth":7,"direct":false,"root":false,"dev":true,"dependents":4,"transitive":46},{"name":"supports-color","version":"5.5.0","depth":4,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":46},{"name":"chalk","version":"2.4.2","depth":3,"direct":false,"root":false,"dev":true,"dependents":6,"transitive":45},{"name":"has","version":"1.0.3","depth":7,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":45},{"name":"minimatch","version":"3.0.4","depth":3,"direct":false,"root":false,"dev":true,"dependents":6,"transitive":45},{"name":"through","version":"2.3.8","depth":5,"direct":false,"root":false,"dev":true,"dependents":4,"transitive":45},{"name":"json-parse-better-errors","version":"1.0.2","depth":5,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":44},{"name":"pump","version":"3.0.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":44},{"name":"is-plain-obj","version":"1.1.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":5,"transitive":42},{"name":"os-homedir","version":"1.0.2","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":42},{"name":"imurmurhash","version":"0.1.4","depth":5,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":41},{"name":"isexe","version":"2.0.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":41},{"name":"osenv","version":"0.1.5","depth":4,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":41},{"name":"which","version":"1.3.1","depth":4,"direct":false,"root":false,"dev":true,"dependents":4,"transitive":40},{"name":"fs.realpath","version":"1.0.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":39},{"name":"inflight","version":"1.0.6","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":39},{"name":"path-is-absolute","version":"1.0.1","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":39},{"name":"builtins","version":"1.0.3","depth":4,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":38},{"name":"get-stream","version":"4.1.0","depth":4,"direct":false,"root":false,"dev":true,"dependents":5,"transitive":38},{"name":"glob","version":"7.1.6","depth":4,"direct":false,"root":false,"dev":true,"dependents":7,"transitive":38},{"name":"is-plain-object","version":"2.0.4","depth":5,"direct":false,"root":false,"dev":true,"dependents":4,"transitive":38},{"name":"kind-of","version":"3.2.2","depth":10,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":37},{"name":"kind-of","version":"3.2.2","depth":10,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":37},{"name":"is-extendable","version":"0.1.1","depth":8,"direct":false,"root":false,"dev":true,"dependents":8,"transitive":37},{"name":"semver","version":"5.7.1","depth":4,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":37},{"name":"spdx-exceptions","version":"2.3.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":37},{"name":"spdx-license-ids","version":"3.0.7","depth":5,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":37},{"name":"validate-npm-package-name","version":"3.0.0","depth":3,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":37},{"name":"is-accessor-descriptor","version":"0.1.6","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":36},{"name":"is-data-descriptor","version":"0.1.4","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":36},{"name":"kind-of","version":"5.1.0","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":36},{"name":"npm-package-arg","version":"6.1.1","depth":3,"direct":false,"root":false,"dev":true,"dependents":16,"transitive":36},{"name":"spdx-expression-parse","version":"3.0.1","depth":4,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":36},{"name":"is-core-module","version":"2.2.0","depth":6,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":35},{"name":"is-descriptor","version":"0.1.6","depth":8,"direct":false,"root":false,"dev":true,"dependents":5,"transitive":35},{"name":"is-stream","version":"1.1.0","depth":4,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":35},{"name":"parse-json","version":"4.0.0","depth":4,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":35},{"name":"path-key","version":"2.0.1","depth":6,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":35},{"name":"path-parse","version":"1.0.6","depth":6,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":35},{"name":"shebang-regex","version":"1.0.0","depth":7,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":35},{"name":"spdx-correct","version":"3.1.1","depth":4,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":35},{"name":"assign-symbols","version":"1.0.0","depth":7,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":34},{"name":"semver","version":"5.7.1","depth":6,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":34},{"name":"is-extendable","version":"1.0.1","depth":7,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":34},{"name":"nice-try","version":"1.0.5","depth":6,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":34},{"name":"p-finally","version":"1.0.0","depth":3,"direct":false,"root":false,"dev":true,"dependents":4,"transitive":34},{"name":"resolve","version":"1.20.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":34},{"name":"shebang-command","version":"1.2.0","depth":6,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":34},{"name":"strip-bom","version":"3.0.0","depth":4,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":34},{"name":"validate-npm-package-license","version":"3.0.4","depth":3,"direct":false,"root":false,"dev":true,"dependents":5,"transitive":34},{"name":"cross-spawn","version":"6.0.5","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":33},{"name":"decode-uri-component","version":"0.2.0","depth":8,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":33},{"name":"extend-shallow","version":"3.0.2","depth":6,"direct":false,"root":false,"dev":true,"dependents":5,"transitive":33},{"name":"kind-of","version":"3.2.2","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":33},{"name":"npm-run-path","version":"2.0.2","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":33},{"name":"strip-eof","version":"1.0.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":33},{"name":"execa","version":"1.0.0","depth":4,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":32},{"name":"figgy-pudding","version":"3.5.2","depth":3,"direct":false,"root":false,"dev":true,"dependents":18,"transitive":32},{"name":"get-value","version":"2.0.6","depth":9,"direct":false,"root":false,"dev":true,"dependents":4,"transitive":32},{"name":"is-number","version":"3.0.0","depth":8,"direct":false,"root":false,"dev":true,"dependents":3,"transitive":32},{"name":"safer-buffer","version":"2.1.2","depth":7,"direct":false,"root":false,"dev":true,"dependents":5,"transitive":32},{"name":"pify","version":"3.0.0","depth":6,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":31},{"name":"arr-union","version":"3.1.0","depth":9,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":30},{"name":"copy-descriptor","version":"0.1.1","depth":11,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":30},{"name":"kind-of","version":"4.0.0","depth":11,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":30},{"name":"define-property","version":"0.2.5","depth":11,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":30},{"name":"kind-of","version":"3.2.2","depth":11,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":30},{"name":"object-visit","version":"1.0.1","depth":10,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":30},{"name":"path-type","version":"3.0.0","depth":5,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":30},{"name":"pify","version":"4.0.1","depth":3,"direct":false,"root":false,"dev":true,"dependents":8,"transitive":30},{"name":"extend-shallow","version":"2.0.1","depth":10,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":30},{"name":"split-string","version":"3.1.0","depth":7,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":30},{"name":"isobject","version":"2.1.0","depth":11,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":30},{"name":"has-values","version":"0.1.4","depth":11,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":30},{"name":"is-accessor-descriptor","version":"1.0.0","depth":10,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":29},{"name":"is-data-descriptor","version":"1.0.0","depth":10,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":29},{"name":"duplexer","version":"0.1.2","depth":5,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":29},{"name":"has-values","version":"1.0.0","depth":10,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":29},{"name":"map-visit","version":"1.0.0","depth":10,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":29},{"name":"object-copy","version":"0.1.0","depth":10,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":29},{"name":"set-value","version":"2.0.1","depth":9,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":29},{"name":"define-property","version":"0.2.5","depth":10,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":29},{"name":"kind-of","version":"3.2.2","depth":10,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":29},{"name":"has-value","version":"0.3.1","depth":10,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":29},{"name":"@types/node","version":"14.14.31","depth":5,"direct":false,"root":false,"dev":true,"dependents":4,"transitive":28},{"name":"is-descriptor","version":"1.0.2","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"define-property","version":"0.2.5","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"collection-visit","version":"1.0.0","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"component-emitter","version":"1.3.0","depth":8,"direct":false,"root":false,"dev":true,"dependents":2,"transitive":28},{"name":"is-accessor-descriptor","version":"1.0.0","depth":8,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"is-data-descriptor","version":"1.0.0","depth":8,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"for-in","version":"1.0.2","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"has-value","version":"1.0.0","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"is-extendable","version":"1.0.1","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"mkdirp","version":"0.5.5","depth":4,"direct":false,"root":false,"dev":true,"dependents":7,"transitive":28},{"name":"ret","version":"0.1.15","depth":8,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"semver","version":"6.3.0","depth":3,"direct":false,"root":false,"dev":true,"dependents":11,"transitive":28},{"name":"static-extend","version":"0.1.2","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"strong-log-transformer","version":"2.1.0","depth":4,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"to-object-path","version":"0.3.0","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"union-value","version":"1.0.1","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28},{"name":"unset-value","version":"1.0.0","depth":9,"direct":false,"root":false,"dev":true,"dependents":1,"transitive":28}],"edges":[[0,1],[1,33],[5,4],[11,2],[11,3],[11,9],[11,10],[11,5],[11,6],[11,7],[14,13],[20,19],[22,17],[23,21],[23,22],[23,20],[28,23],[29,25],[29,11],[30,23],[30,20],[30,28],[30,15],[30,24],[30,26],[30,18],[30,8],[33,29],[33,24],[33,30],[33,27],[36,35],[37,36],[38,14],[40,39],[47,42],[47,43],[49,45],[50,49],[50,37],[50,44],[51,48],[52,47],[55,38],[55,14],[60,57],[60,46],[61,59],[63,13],[63,14],[66,55],[67,63],[67,2],[67,52],[67,14],[67,64],[67,62],[68,41],[69,31],[70,31],[75,65],[76,69],[77,70],[79,34],[79,60],[79,72],[79,75],[80,73],[80,74],[81,51],[82,76],[82,77],[82,78],[84,40],[84,54],[88,80],[88,74],[91,68],[94,81],[94,86],[95,87],[97,88],[97,80],[98,95],[98,61],[98,92],[98,85],[98,90],[100,91],[100,89],[101,31],[102,85],[104,8],[104,103],[104,98],[104,66],[104,83],[104,102],[104,93],[107,101],[112,31],[113,82],[114,31],[115,41],[116,109],[118,71],[119,100],[120,3],[122,32],[123,32],[125,107],[125,112],[126,115],[127,111],[127,113],[127,114],[128,68],[128,119],[128,118],[128,71],[129,82],[130,31],[131,106],[131,121],[131,120],[133,122],[133,123],[133,32],[134,82],[135,126],[135,115],[137,32],[138,32],[140,106],[140,125],[140,41],[141,68],[142,16],[145,129],[145,127],[146,124],[146,16],[146,53],[147,130],[148,106],[148,71],[148,128],[148,110],[149,131],[149,41]]};
+var nodes = DATA.nodes, edges = DATA.edges, N = nodes.length;
+var outEdges = nodes.map(function(){ return []; });
+var inEdges = nodes.map(function(){ return []; });
+edges.forEach(function(e){
+  outEdges[e[0]].push(e[1]);
+  inEdges[e[1]].push(e[0]);
+});
+
+document.getElementById('hud-meta').textContent =
+  DATA.title + ' — ' + (N-1) + ' packages charted out of ' + DATA.total + ' total in sphere.';
+
+var cv = document.getElementById('canvas');
+var ctx = cv.getContext('2d');
+var W = 0, H = 0, dpr = 1;
+var view = { x: 0, y: 0, k: 1 };
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+}
+window.addEventListener('resize', resize);
+
+// ---- Background Starfield (Crisp Space Dust) ----
+var bgStars = [];
+function generateStarfield() {
+  bgStars = [];
+  var count = Math.min(280, Math.round((W * H) / 5500));
+  for (var i = 0; i < count; i++) {
+    bgStars.push({
+      x: (Math.random() - 0.5) * 5000,
+      y: (Math.random() - 0.5) * 5000,
+      alpha: Math.random() * 0.25 + 0.08
+    });
+  }
+}
+
+// ---- Open Radial Layout & Generous Spacing ----
+var directCount = 0;
+nodes.forEach(function(n) { if (n.direct) directCount++; });
+var directIdx = 0;
+var orbitRadius = Math.max(300, Math.min(560, 200 + directCount * 50));
+
+nodes.forEach(function(n, i){
+  if (n.root) {
+    n.x = 0;
+    n.y = 0;
+  } else if (n.direct) {
+    var angle = (2 * Math.PI * directIdx) / Math.max(directCount, 1) - Math.PI / 2;
+    directIdx++;
+    n.baseAngle = angle;
+    n.x = Math.cos(angle) * orbitRadius;
+    n.y = Math.sin(angle) * orbitRadius;
+  } else {
+    var goldenAngle = i * 2.39996323;
+    var dist = orbitRadius + (n.depth - 1) * 180 + ((i % 5) * 25);
+    n.x = Math.cos(goldenAngle) * dist;
+    n.y = Math.sin(goldenAngle) * dist;
+  }
+  n.vx = 0;
+  n.vy = 0;
+  n.fixed = false;
+
+  // Modern node sizing
+  if (n.root) {
+    n.r = 13;
+  } else if (n.transitive >= 10) {
+    n.r = Math.min(10.5, 7 + Math.sqrt(n.transitive) * 0.65);
+  } else if (n.direct) {
+    n.r = 8;
+  } else {
+    n.r = 4.5;
+  }
+});
+
+// ---- Monkeytype iv_spade Color Tokens (Strict Palette, No Gradients) ----
+function getStarColors(n, isHot, isDim) {
+  if (isHot) {
+    return {
+      fill: '#b7976a',
+      border: '#c1a174',
+      label: '#b7976a',
+      line: '#b7976a'
+    };
+  }
+  if (n.root) {
+    return {
+      fill: '#b7976a', // --main
+      border: '#c1a174',
+      label: '#b7976a',
+      line: '#b7976a'
+    };
+  }
+  if (n.transitive >= 10) {
+    return {
+      fill: '#ff4d4f', // --error (high contrast bright red)
+      border: '#ff7875',
+      label: '#ff7875',
+      line: '#ff4d4f'
+    };
+  }
+  if (n.direct) {
+    return {
+      fill: '#d3c2c3', // --text
+      border: '#bebebe',
+      label: '#d3c2c3',
+      line: '#b7976a'
+    };
+  }
+  return {
+    fill: '#404040', // --sub
+    border: '#525252',
+    label: '#8c8c8c',
+    line: '#404040'
+  };
+}
+
+// ---- High-Breathing-Room Physics Simulation ----
+var alpha = 1.0;
+function tick() {
+  if (alpha < 0.002) return;
+  var i, j, a, b, dx, dy, d2, d, f;
+
+  // 1. Anti-Collision & Repulsion
+  for (i = 0; i < N; i++) {
+    a = nodes[i];
+    for (j = i + 1; j < N; j++) {
+      b = nodes[j];
+      dx = a.x - b.x;
+      dy = a.y - b.y;
+      d2 = dx * dx + dy * dy;
+      if (d2 > 640000) continue;
+      d = Math.sqrt(d2) || 1;
+
+      var minDist = a.r + b.r + (a.direct && b.direct ? 115 : (a.direct || b.direct ? 78 : 56));
+      if (d < minDist) {
+        var overlap = (minDist - d) * 0.5 * alpha;
+        var ux = (dx / d) * overlap;
+        var uy = (dy / d) * overlap;
+        a.vx += ux; a.vy += uy;
+        b.vx -= ux; b.vy -= uy;
+      }
+
+      var repulse = 9000 + (a.direct && b.direct ? 5500 : 0) + Math.min(a.transitive, 40) * 90 + Math.min(b.transitive, 40) * 90;
+      f = (repulse / (d2 + 150)) * alpha;
+      a.vx += (dx / d) * f;
+      a.vy += (dy / d) * f;
+      b.vx -= (dx / d) * f;
+      b.vy -= (dy / d) * f;
+    }
+  }
+
+  // 2. Constellation Springs
+  for (i = 0; i < edges.length; i++) {
+    a = nodes[edges[i][0]];
+    b = nodes[edges[i][1]];
+    dx = b.x - a.x;
+    dy = b.y - a.y;
+    d = Math.sqrt(dx * dx + dy * dy) || 1;
+    var isDirectPair = a.direct && b.direct;
+    var restLen = (isDirectPair ? 220 : 155) + Math.min(75, Math.sqrt(a.transitive) * 8);
+    f = (d - restLen) * 0.025 * alpha;
+    a.vx += (dx / d) * f;
+    a.vy += (dy / d) * f;
+    b.vx -= (dx / d) * f;
+    b.vy -= (dy / d) * f;
+  }
+
+  // 3. Gentle Centering towards Radial Depth & Compass Positions
+  for (i = 0; i < N; i++) {
+    a = nodes[i];
+    if (a.direct && a.baseAngle !== undefined) {
+      var targetX = Math.cos(a.baseAngle) * orbitRadius;
+      var targetY = Math.sin(a.baseAngle) * orbitRadius;
+      a.vx += (targetX - a.x) * 0.04 * alpha;
+      a.vy += (targetY - a.y) * 0.04 * alpha;
+    } else {
+      d = Math.sqrt(a.x * a.x + a.y * a.y) || 1;
+      var targetDist = a.root ? 0 : (orbitRadius + (a.depth - 1) * 170);
+      f = (targetDist - d) * 0.012 * alpha;
+      a.vx += (a.x / d) * f;
+      a.vy += (a.y / d) * f;
+    }
+  }
+
+  // 4. Inertia & Damping
+  for (i = 0; i < N; i++) {
+    a = nodes[i];
+    if (a.root && !a.fixed) {
+      a.x = 0; a.y = 0; a.vx = 0; a.vy = 0;
+      continue;
+    }
+    if (a.fixed) {
+      a.vx = 0; a.vy = 0;
+      continue;
+    }
+    a.vx *= 0.84;
+    a.vy *= 0.84;
+    a.x += a.vx;
+    a.y += a.vy;
+  }
+
+  alpha *= 0.994;
+}
+
+function fit() {
+  var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  nodes.forEach(function(n) {
+    x0 = Math.min(x0, n.x - n.r * 2);
+    y0 = Math.min(y0, n.y - n.r * 2);
+    x1 = Math.max(x1, n.x + n.r * 2);
+    y1 = Math.max(y1, n.y + n.r * 2);
+  });
+  var w = Math.max(x1 - x0, 1), h = Math.max(y1 - y0, 1);
+  view.k = Math.min(W / w, H / h) * 0.88;
+  view.x = W / 2 - (x0 + w / 2) * view.k;
+  view.y = H / 2 - (y0 + h / 2) * view.k;
+}
+
+// ---- Constellation Selection ----
+var sel = -1, hot = new Set(), hover = -1;
+function select(i) {
+  sel = i;
+  hot = new Set();
+  if (i >= 0) {
+    var st = [i];
+    hot.add(i);
+    while (st.length) {
+      var c = st.pop();
+      for (var k = 0; k < inEdges[c].length; k++) {
+        var p = inEdges[c][k];
+        if (!hot.has(p)) {
+          hot.add(p);
+          st.push(p);
+        }
+      }
+    }
+  }
+  updateInfo();
+}
+
+function updateInfo() {
+  var el = document.getElementById('stellar-info');
+  el.textContent = '';
+  if (sel < 0) {
+    var h = document.createElement('div');
+    h.className = 'hud-hint';
+    h.textContent = 'click any node to trace callers. drag to reposition, scroll to zoom.';
+    el.appendChild(h);
+    return;
+  }
+
+  var n = nodes[sel];
+  var nameEl = document.createElement('div');
+  nameEl.className = 'stellar-name';
+
+  var badgeClass = n.root ? 'badge-root' : (n.transitive >= 10 ? 'badge-hot' : (n.direct ? 'badge-direct' : 'badge-trans'));
+  var badgeLabel = n.root ? 'root' : (n.transitive >= 10 ? 'high blast' : (n.direct ? 'direct' : 'transitive'));
+
+  nameEl.innerHTML = n.name + (n.version ? ' <span style="font-size:11px;color:var(--text-muted);">@' + n.version + '</span>' : '') +
+    ' <span class="stellar-badge ' + badgeClass + '">' + badgeLabel + '</span>';
+  el.appendChild(nameEl);
+
+  var affected = hot.size - 1 - ((hot.has(0) && sel !== 0) ? 1 : 0);
+  addMetric(el, 'orbital depth', n.root ? 'center' : (n.depth + ' hops'));
+  addMetric(el, 'direct callers', n.dependents + ' callers');
+  addMetric(el, 'transitive blast radius', (n.transitive > 0 ? n.transitive + ' packages' : 'isolated'));
+  addMetric(el, 'callers affected', Math.max(affected, 0) + ' affected');
+}
+
+function addMetric(container, label, val) {
+  var r = document.createElement('div');
+  r.className = 'stellar-row';
+  r.innerHTML = '<span>' + label + '</span><b>' + val + '</b>';
+  container.appendChild(r);
+}
+
+// ---- Canvas Modern Vector Renderer (Clean, No Foggy Gradients) ----
+function draw() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // 1. iv_spade background (#0c0c0c)
+  ctx.fillStyle = '#0c0c0c';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.translate(view.x, view.y);
+  ctx.scale(view.k, view.k);
+
+  // 2. Crisp, subtle background starlight dust
+  bgStars.forEach(function(s) {
+    ctx.fillStyle = 'rgba(211, 194, 195, ' + s.alpha + ')';
+    ctx.fillRect(s.x, s.y, 1.2 / view.k, 1.2 / view.k);
+  });
+
+  var dim = sel >= 0;
+
+  // 3. Constellation Edges (Clean Vector Lines)
+  for (var pass = 0; pass < 2; pass++) {
+    for (var i = 0; i < edges.length; i++) {
+      var e = edges[i];
+      var isHot = dim && hot.has(e[0]) && hot.has(e[1]);
+      if ((pass === 1) !== isHot) continue;
+
+      var a = nodes[e[0]], b = nodes[e[1]];
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var d = Math.sqrt(dx * dx + dy * dy);
+      if (d < 1) continue;
+
+      var ux = dx / d, uy = dy / d;
+      var sx = a.x + ux * a.r, sy = a.y + uy * a.r;
+      var tx = b.x - ux * b.r, ty = b.y - uy * b.r;
+
+      if (isHot) {
+        ctx.strokeStyle = '#b7976a'; // --main
+        ctx.lineWidth = 1.8 / view.k;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(tx, ty);
+        ctx.stroke();
+
+        ctx.fillStyle = '#b7976a';
+        ctx.beginPath();
+        ctx.arc((sx + tx) * 0.5, (sy + ty) * 0.5, 2.0 / view.k, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = dim ? 'rgba(64, 64, 64, 0.15)' : 'rgba(64, 64, 64, 0.45)';
+        ctx.lineWidth = 0.9 / view.k;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(tx, ty);
+        ctx.stroke();
+      }
+
+      // Minimal arrow chevron
+      var arrowSize = (isHot ? 5 : 4) / view.k;
+      ctx.fillStyle = isHot ? '#b7976a' : (dim ? 'rgba(64, 64, 64, 0.2)' : 'rgba(80, 80, 80, 0.5)');
+      ctx.beginPath();
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(tx - ux * arrowSize - uy * (arrowSize * 0.35), ty - uy * arrowSize + ux * (arrowSize * 0.35));
+      ctx.lineTo(tx - ux * arrowSize + uy * (arrowSize * 0.35), ty - uy * arrowSize - ux * (arrowSize * 0.35));
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // 4. Vector Stars (Nodes)
+  for (i = 0; i < N; i++) {
+    var n = nodes[i];
+    var isHot = dim && hot.has(i);
+    var isSel = (i === sel);
+    var isHover = (i === hover);
+    var alphaNode = (dim && !isHot) ? 0.2 : 1.0;
+
+    var colors = getStarColors(n, isHot, dim && !isHot);
+
+    ctx.save();
+    ctx.globalAlpha = alphaNode;
+
+    // Solid Star Disk
+    ctx.fillStyle = colors.fill;
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Sharp 1.2px Border
+    ctx.strokeStyle = colors.border;
+    ctx.lineWidth = 1.2 / view.k;
+    ctx.stroke();
+
+    // Center indicator dot
+    if (n.root || n.direct || n.transitive >= 10 || isSel) {
+      ctx.fillStyle = n.root ? '#0c0c0c' : '#ffffff';
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, Math.max(1.5, n.r * 0.35), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Rare Accent Ring ONLY on Selected, Hovered, or Root Sun
+    if (isSel || isHover || n.root) {
+      ctx.strokeStyle = isSel ? '#b7976a' : (isHover ? '#d3c2c3' : '#b7976a');
+      ctx.lineWidth = 1.5 / view.k;
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r + (isSel ? 4.5 : 3.0) / view.k, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  // 5. Intelligent, Readable Labels with Clean Background Pill
+  ctx.font = '500 ' + (11 / view.k) + 'px "Roboto Mono", monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  var candidateNodes = [];
+  for (i = 0; i < N; i++) {
+    var m = nodes[i];
+    var isHot = dim && hot.has(i);
+    var prio = 0;
+    if (i === sel) prio = 5;
+    else if (i === hover) prio = 4;
+    else if (m.root) prio = 3;
+    else if (m.direct) prio = 2;
+    else if (isHot || m.transitive >= 10) prio = 1;
+    else if (view.k > 1.35) prio = 0;
+    else continue;
+
+    candidateNodes.push({ idx: i, node: m, prio: prio, isHot: isHot });
+  }
+
+  candidateNodes.sort(function(a, b) { return b.prio - a.prio; });
+  var placedBoxes = [];
+
+  for (i = 0; i < candidateNodes.length; i++) {
+    var item = candidateNodes[i];
+    var m = item.node;
+    var idx = item.idx;
+    var isHot = item.isHot;
+
+    var textY = m.y + m.r + 9 / view.k;
+    var textW = ctx.measureText(m.name).width;
+    var padX = 4 / view.k;
+    var boxH = 13 / view.k;
+    var boxW = textW + padX * 2;
+    var boxX = m.x - boxW / 2;
+    var boxY = textY - boxH / 2;
+
+    var collides = false;
+    for (var bIdx = 0; bIdx < placedBoxes.length; bIdx++) {
+      var pb = placedBoxes[bIdx];
+      if (boxX < pb.x + pb.w && boxX + boxW > pb.x && boxY < pb.y + pb.h && boxY + boxH > pb.y) {
+        collides = true;
+        break;
+      }
+    }
+
+    if (collides && item.prio <= 2) {
+      textY = m.y - m.r - 9 / view.k;
+      boxY = textY - boxH / 2;
+      collides = false;
+      for (var bIdx = 0; bIdx < placedBoxes.length; bIdx++) {
+        var pb = placedBoxes[bIdx];
+        if (boxX < pb.x + pb.w && boxX + boxW > pb.x && boxY < pb.y + pb.h && boxY + boxH > pb.y) {
+          collides = true;
+          break;
+        }
+      }
+    }
+
+    if (collides && item.prio < 2) continue;
+
+    placedBoxes.push({ x: boxX, y: boxY, w: boxW, h: boxH });
+
+    ctx.save();
+    ctx.globalAlpha = (dim && !isHot) ? 0.25 : 1.0;
+
+    // Clean background pill in --sub-alt (#121212)
+    ctx.fillStyle = 'rgba(18, 18, 18, 0.94)';
+    ctx.fillRect(boxX, boxY, boxW, boxH);
+
+    ctx.fillStyle = (idx === sel) ? '#b7976a' : (isHot ? '#b7976a' : (m.root ? '#b7976a' : (m.direct ? '#d3c2c3' : '#a0a0a0')));
+    ctx.fillText(m.name, m.x, textY);
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+// ---- User Interactions (Drag, Zoom, Pan, Search) ----
+function pick(x, y) {
+  var wx = (x - view.x) / view.k;
+  var wy = (y - view.y) / view.k;
+  for (var i = N - 1; i >= 0; i--) {
+    var n = nodes[i];
+    var dx = wx - n.x;
+    var dy = wy - n.y;
+    var r = n.r + 7 / view.k;
+    if (dx * dx + dy * dy <= r * r) return i;
+  }
+  return -1;
+}
+
+var drag = -1, pan = false, movedDist = 0, last = { x: 0, y: 0 };
+
+cv.addEventListener('pointerdown', function(e) {
+  if (cv.setPointerCapture) cv.setPointerCapture(e.pointerId);
+  movedDist = 0;
+  last = { x: e.clientX, y: e.clientY };
+  var i = pick(e.clientX, e.clientY);
+  if (i >= 0) {
+    drag = i;
+    nodes[i].fixed = true;
+  } else {
+    pan = true;
+  }
+  cv.style.cursor = 'grabbing';
+});
+
+cv.addEventListener('pointermove', function(e) {
+  var dx = e.clientX - last.x;
+  var dy = e.clientY - last.y;
+  if (drag >= 0) {
+    movedDist += Math.abs(dx) + Math.abs(dy);
+    nodes[drag].x = (e.clientX - view.x) / view.k;
+    nodes[drag].y = (e.clientY - view.y) / view.k;
+    alpha = Math.max(alpha, 0.35);
+  } else if (pan) {
+    movedDist += Math.abs(dx) + Math.abs(dy);
+    view.x += dx;
+    view.y += dy;
+  } else {
+    hover = pick(e.clientX, e.clientY);
+    cv.style.cursor = hover >= 0 ? 'pointer' : 'grab';
+  }
+  last = { x: e.clientX, y: e.clientY };
+});
+
+function release() {
+  if (movedDist < 5) {
+    select(drag >= 0 ? drag : -1);
+  }
+  if (drag >= 0) nodes[drag].fixed = false;
+  drag = -1;
+  pan = false;
+  cv.style.cursor = 'grab';
+}
+cv.addEventListener('pointerup', release);
+cv.addEventListener('pointercancel', release);
+
+cv.addEventListener('wheel', function(e) {
+  e.preventDefault();
+  var k0 = view.k;
+  var k = Math.min(8, Math.max(0.04, k0 * Math.exp(-e.deltaY * 0.0016)));
+  var wx = (e.clientX - view.x) / k0;
+  var wy = (e.clientY - view.y) / k0;
+  view.k = k;
+  view.x = e.clientX - wx * k;
+  view.y = e.clientY - wy * k;
+}, { passive: false });
+
+document.getElementById('search').addEventListener('input', function() {
+  var q = this.value.trim().toLowerCase();
+  if (!q) {
+    select(-1);
+    return;
+  }
+  var best = -1;
+  for (var i = 0; i < N; i++) {
+    if (nodes[i].name.toLowerCase().indexOf(q) >= 0 && (best < 0 || nodes[i].transitive > nodes[best].transitive)) {
+      best = i;
+    }
+  }
+  if (best >= 0) {
+    select(best);
+    view.x = W / 2 - nodes[best].x * view.k;
+    view.y = H / 2 - nodes[best].y * view.k;
+  }
+});
+
+// Controls
+document.getElementById('btn-recenter').addEventListener('click', function() {
+  fit();
+  select(-1);
+});
+document.getElementById('btn-zoom-in').addEventListener('click', function() {
+  var cx = W / 2, cy = H / 2;
+  var wx = (cx - view.x) / view.k, wy = (cy - view.y) / view.k;
+  view.k = Math.min(8, view.k * 1.35);
+  view.x = cx - wx * view.k;
+  view.y = cy - wy * view.k;
+});
+document.getElementById('btn-zoom-out').addEventListener('click', function() {
+  var cx = W / 2, cy = H / 2;
+  var wx = (cx - view.x) / view.k, wy = (cy - view.y) / view.k;
+  view.k = Math.max(0.04, view.k / 1.35);
+  view.x = cx - wx * view.k;
+  view.y = cy - wy * view.k;
+});
+
+function boot() {
+  resize();
+  generateStarfield();
+  for (var s = 0; s < 600; s++) tick();
+  fit();
+  updateInfo();
+  function loop() {
+    tick();
+    draw();
+    window.requestAnimationFrame(loop);
+  }
+  loop();
+}
+
+if (document.readyState === 'complete') {
+  setTimeout(boot, 40);
+} else {
+  window.addEventListener('load', function() { setTimeout(boot, 40); });
+}
+setTimeout(function() { resize(); fit(); }, 250);
+})();
+</script>
+</body>
+</html>
