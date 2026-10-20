@@ -17,6 +17,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
+	"runtime/trace"
 )
 
 func main() {
@@ -35,11 +38,53 @@ func main() {
 	healthTop := flag.Int("health-top", 0, "also check this many additional packages by blast-radius rank")
 	healthJSON := flag.String("health-json", "", "write the health report as JSON to this path")
 	model := flag.String("model", "gemma4:e4b", "Ollama model to use for the interactive agent (used when no -repo/-file is given)")
+	cpuprofile := flag.String("cpuprofile", "", "write a CPU profile to this file (non-agent mode only)")
+	memprofile := flag.String("memprofile", "", "write a heap profile to this file on exit (non-agent mode only)")
+	traceOut := flag.String("trace", "", "write an execution trace to this file (non-agent mode only)")
 	flag.Parse()
 
 	if *repo == "" && *file == "" {
 		agents.RunAgentMode(*model)
 		return
+	}
+
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "cpuprofile:", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintln(os.Stderr, "cpuprofile:", err)
+			os.Exit(1)
+		}
+		defer pprof.StopCPUProfile()
+	}
+	if *traceOut != "" {
+		f, err := os.Create(*traceOut)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "trace:", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		if err := trace.Start(f); err != nil {
+			fmt.Fprintln(os.Stderr, "trace:", err)
+			os.Exit(1)
+		}
+		defer trace.Stop()
+	}
+	if *memprofile != "" {
+		defer func() {
+			f, err := os.Create(*memprofile)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "memprofile:", err)
+				return
+			}
+			defer f.Close()
+			runtime.GC()
+			_ = pprof.WriteHeapProfile(f)
+		}()
 	}
 
 	var data []byte

@@ -523,8 +523,7 @@ func CreateGithubIssue(targetRepo string, draft IssueDraft) (GithubCreatedIssue,
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := core.SharedHTTPClient.Do(req)
 	if err != nil {
 		return GithubCreatedIssue{}, err
 	}

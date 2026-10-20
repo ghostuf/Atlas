@@ -28,6 +28,16 @@ import (
 
 // ---------- shared HTTP ----------
 
+// SharedHTTPClient is reused across every network call this program makes
+// (npm, GitHub, OSV, and the lockfile-fetch/issue-creation paths in other
+// packages). A fresh *http.Client means a fresh, unpooled *http.Transport, so
+// every single request was paying for a brand new TCP+TLS handshake even
+// when hitting the same host (api.github.com, registry.npmjs.org, ...)
+// repeatedly in the same run — that handshake overhead was the single
+// largest contributor in the CPU/network profile. Reusing one client lets
+// the default Transport keep connections alive and pool/reuse them per host.
+var SharedHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 // HttpGet executes a GET request and returns body, status code, and error.
 func HttpGet(u string, headers map[string]string) ([]byte, int, error) {
 	req, err := http.NewRequest("GET", u, nil)
@@ -37,11 +47,7 @@ func HttpGet(u string, headers map[string]string) ([]byte, int, error) {
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	// PERF: (arun) Maybe we could share a single `http.Client` for many requests.
-	// PERF: This may save TLS handshake overhead which currently blocks the program
-	// PERF: for a cumulative total of 6.83 seconds (kind of, maybe).
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := SharedHTTPClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -205,8 +211,7 @@ func paginatedCount(u string) (int, error) {
 	for k, v := range GithubHeaders() {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := SharedHTTPClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -269,15 +274,28 @@ type contributorStat struct {
 	Weeks []contributorWeek `json:"weeks"`
 }
 
+// fetchGithubContributorStats polls GitHub's stats/contributors endpoint,
+// which returns 202 while it computes the stats in the background for a repo
+// that hasn't been queried recently (can take a while for a large/active
+// repo). Backs off exponentially (250ms, 500ms, 1s, 2s, 4s — ~7.75s worst
+// case across 6 attempts) rather than a fixed 1s sleep: that gives slow repos
+// a realistic chance to finish computing before we give up, while still
+// failing fast on repos that return instantly.
 func fetchGithubContributorStats(owner, repo string) ([]contributorStat, error) {
 	u := fmt.Sprintf("https://api.github.com/repos/%s/%s/stats/contributors", owner, repo)
-	for attempt := 0; attempt < 4; attempt++ {
+	const maxAttempts = 6
+	backoff := 250 * time.Millisecond
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		body, status, err := HttpGet(u, GithubHeaders())
 		if err != nil {
 			return nil, err
 		}
 		if status == 202 {
-			time.Sleep(1 * time.Second)
+			if attempt == maxAttempts-1 {
+				break
+			}
+			time.Sleep(backoff)
+			backoff *= 2
 			continue
 		}
 		if status == 403 || status == 429 {
@@ -413,8 +431,7 @@ func osvBatchQueryChunk(targets []*Node) (map[string][]string, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := SharedHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -456,21 +473,42 @@ func osvBatchQuery(targets []*Node) (map[string][]Advisory, error) {
 		}
 	}
 
-	// PERF: (arun) OSV detail queries are currently serial HTTP chains. There is a huge performance
-	// PERF: bottleneck here. Parallel requests should be tried out.
-	details := map[string]*osvVulnDetail{}
+	// Dedup first (the same advisory ID commonly recurs across packages), then
+	// fetch each unique advisory's detail concurrently instead of one at a
+	// time — this was a serial HTTP chain, the single biggest contributor to
+	// the OSV-side network wait in the profile.
+	var uniqueIDs []string
+	seenID := map[string]bool{}
 	for _, ids := range idsByPkg {
 		for _, id := range ids {
-			if _, done := details[id]; done {
-				continue
+			if !seenID[id] {
+				seenID[id] = true
+				uniqueIDs = append(uniqueIDs, id)
 			}
+		}
+	}
+
+	details := make(map[string]*osvVulnDetail, len(uniqueIDs))
+	var detailsMu sync.Mutex
+	var wg sync.WaitGroup
+	const osvDetailConcurrency = 10
+	sem := make(chan struct{}, osvDetailConcurrency)
+	for _, id := range uniqueIDs {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			d, err := fetchOsvVulnDetail(id)
 			if err != nil {
 				d = &osvVulnDetail{}
 			}
+			detailsMu.Lock()
 			details[id] = d
-		}
+			detailsMu.Unlock()
+		}(id)
 	}
+	wg.Wait()
 
 	out := map[string][]Advisory{}
 	for pkg, ids := range idsByPkg {
@@ -631,8 +669,14 @@ func RunHealth(g *Graph, topN int) []*Health {
 	}
 
 	rows := make([]*Health, len(targets))
-	// PERF: Why is maxConcurrency only 5?
-	const maxConcurrency = 5
+	// Each target makes up to ~5 sequential HTTP calls to npm/GitHub/OSV, so
+	// this bounds how many packages are "in flight" at once, not total
+	// requests. 5 was conservative leftover from before requests shared a
+	// pooled client/connection; 12 keeps us comfortably under GitHub's
+	// documented secondary-rate-limit guidance (avoid large concurrent
+	// bursts) while meaningfully cutting wall-clock time now that connection
+	// reuse and OSV detail fetching no longer force extra serialization.
+	const maxConcurrency = 12
 	sem := make(chan struct{}, maxConcurrency)
 	var wg sync.WaitGroup
 	for i, n := range targets {
