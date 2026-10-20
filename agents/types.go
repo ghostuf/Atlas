@@ -15,6 +15,7 @@ type Agent interface {
 type RiskCandidate struct {
 	Package          string
 	Version          string
+	Ecosystem        core.Ecosystem
 	Dev              bool
 	Classification   string
 	BlastRadius      int
@@ -34,8 +35,8 @@ type RiskCandidate struct {
 // CouplingAssessment is the structured output from the Coupling Agent.
 type CouplingAssessment struct {
 	Package           string `json:"package"`
-	CouplingLevel     string `json:"coupling_level"`    // "low", "medium", "high"
-	ArchitecturalRole string `json:"architectural_role"`// e.g. "core infrastructure", "surface utility", "middleware"
+	CouplingLevel     string `json:"coupling_level"`     // "low", "medium", "high"
+	ArchitecturalRole string `json:"architectural_role"` // e.g. "core infrastructure", "surface utility", "middleware"
 	Reason            string `json:"reason"`
 	IsLoadBearing     bool   `json:"is_load_bearing"`
 }
@@ -44,9 +45,9 @@ type CouplingAssessment struct {
 type VulnerabilityAssessment struct {
 	Package            string `json:"package"`
 	ContextualSeverity string `json:"contextual_severity"` // "CRITICAL", "HIGH", "MODERATE", "LOW"
-	Exploitability     string `json:"exploitability"`     // "reachable_in_prod", "test_only", "isolated", "unreachable"
+	Exploitability     string `json:"exploitability"`      // "reachable_in_prod", "test_only", "isolated", "unreachable"
 	Summary            string `json:"summary"`
-	Urgency            string `json:"urgency"`            // "immediate", "next_sprint", "backlog", "monitor"
+	Urgency            string `json:"urgency"` // "immediate", "next_sprint", "backlog", "monitor"
 }
 
 // MaintenanceAssessment is the structured output from the Maintenance Agent.
@@ -90,6 +91,7 @@ const (
 type IssueableRisk struct {
 	Package        string
 	Version        string
+	Ecosystem      core.Ecosystem
 	Classification string
 	Advisory       *core.Advisory
 	Health         *core.Health

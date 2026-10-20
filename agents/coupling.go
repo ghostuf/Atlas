@@ -63,7 +63,7 @@ func (a *CouplingAgent) Analyze(ctx context.Context, c RiskCandidate) (*Coupling
 		}
 
 		prompt := fmt.Sprintf(
-			"Analyze the architectural coupling for npm package %q in this project.\n"+
+			"Analyze the architectural coupling for %s package %q in this project.\n"+
 				"Production files importing it: %d\n"+
 				"Test files importing it: %d\n"+
 				"Top-level directories touched: %d\n"+
@@ -71,7 +71,7 @@ func (a *CouplingAgent) Analyze(ctx context.Context, c RiskCandidate) (*Coupling
 				"Direct/Transitive dependents affected if it breaks: %d\n"+
 				"Sample usage: %s\n\n"+
 				"Classify whether this is low, medium, or high coupling, its role, and whether it is load-bearing infrastructure.",
-			c.Package, prodCount, testCount, dirsCount, strings.Join(tags, ", "), c.BlastRadius, c.UsedIn,
+			c.Ecosystem.DisplayName(), c.Package, prodCount, testCount, dirsCount, strings.Join(tags, ", "), c.BlastRadius, c.UsedIn,
 		)
 
 		var respText string

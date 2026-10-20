@@ -22,7 +22,7 @@ var gaugeBands = []struct {
 	Color      string
 	Start, End float64
 }{
-	{"Poor", "#ff4d4f", 0, 40},            // --error (high contrast bright red)
+	{"Poor", "#ff4d4f", 0, 40},             // --error (high contrast bright red)
 	{"Needs attention", "#ff7875", 40, 60}, // --error-extra (bright coral red)
 	{"Fair", "#404040", 60, 80},            // --sub
 	{"Good", "#b7976a", 80, 100},           // --main (gold accent)

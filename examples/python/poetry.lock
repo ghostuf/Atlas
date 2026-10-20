@@ -1,0 +1,52 @@
+# Hand-written fixture for teaching/testing Atlas's Python (poetry) support.
+# Mirrors examples/package-lock.json's role for the npm path: requests@2.31.0
+# is deliberately pinned to an old version with real, known OSV advisories,
+# so a health check against this fixture demonstrates genuine vulnerability
+# detection end to end.
+
+[[package]]
+name = "requests"
+version = "2.31.0"
+category = "main"
+optional = false
+
+[package.dependencies]
+certifi = ">=2017.4.17"
+charset-normalizer = ">=2,<4"
+idna = ">=2.5,<4"
+urllib3 = ">=1.21.1,<3"
+
+[[package]]
+name = "PyYAML"
+version = "6.0.1"
+category = "main"
+
+[[package]]
+name = "certifi"
+version = "2023.7.22"
+category = "main"
+
+[[package]]
+name = "charset-normalizer"
+version = "3.2.0"
+category = "main"
+
+[[package]]
+name = "idna"
+version = "3.4"
+category = "main"
+
+[[package]]
+name = "urllib3"
+version = "2.0.4"
+category = "main"
+
+[[package]]
+name = "pytest"
+version = "7.4.0"
+category = "dev"
+
+[metadata]
+lock-version = "1.1"
+python-versions = "^3.11"
+content-hash = "0000000000000000000000000000000000000000000000000000000000000"

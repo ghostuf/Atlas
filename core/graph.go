@@ -50,8 +50,9 @@ type Node struct {
 
 // Graph represents the entire dependency graph.
 type Graph struct {
-	Nodes map[string]*Node
-	Root  *Node
+	Nodes     map[string]*Node
+	Root      *Node
+	Ecosystem Ecosystem // which package manager this graph was built from
 }
 
 // NameFromPath turns "node_modules/a/node_modules/@s/b" into "@s/b".
@@ -92,7 +93,7 @@ func BuildGraph(lf *Lockfile) (*Graph, error) {
 	if len(lf.Packages) == 0 {
 		return nil, lockfileEmptyError(lf)
 	}
-	g := &Graph{Nodes: map[string]*Node{}}
+	g := &Graph{Nodes: map[string]*Node{}, Ecosystem: EcosystemNPM}
 
 	for id, e := range lf.Packages {
 		n := &Node{ID: id, Name: NameFromPath(id), Version: e.Version, Dev: e.Dev}
@@ -127,9 +128,17 @@ func BuildGraph(lf *Lockfile) (*Graph, error) {
 			addEdges(id, e.DevDependencies)
 		}
 	}
+	FinalizeGraph(g)
+	return g, nil
+}
+
+// FinalizeGraph dedupes edges and computes depth/direct/blast-radius
+// metrics. Any graph builder — npm's BuildGraph, or another ecosystem's
+// package building its own graph from its own lockfile format — calls this
+// once after wiring all nodes and edges.
+func FinalizeGraph(g *Graph) {
 	dedupe(g)
 	computeMetrics(g)
-	return g, nil
 }
 
 func dedupe(g *Graph) {

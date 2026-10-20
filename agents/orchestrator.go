@@ -2,6 +2,7 @@ package agents
 
 import (
 	"atlas/core"
+	"atlas/core/python"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -21,7 +22,7 @@ const reportDir = "reports"
 
 const systemPrompt = `You are Atlas, an orchestrating dependency risk analysis agent.
 
-You have tools to analyze a project's npm dependency graph. For any request
+You have tools to analyze a project's npm or Python (poetry) dependency graph. For any request
 about analyzing, auditing, or checking a repository's dependencies:
 
 1. Always call analyze_repository first. It needs either a GitHub repo as
@@ -81,6 +82,7 @@ about analyzing, auditing, or checking a repository's dependencies:
 // Session tracks the active analysis state in a conversation.
 type Session struct {
 	Graph      *core.Graph
+	Adapter    core.EcosystemAdapter // set once in AnalyzeRepository, reused by ScanUsage/CheckHealth
 	SrcDir     string
 	Repo       string
 	GithubRepo string // owner/name; empty when analysis came from a local lockfile, not a GitHub repo
@@ -98,21 +100,21 @@ func (s *Session) Reset() {
 	if s.Cleanup != nil {
 		s.Cleanup()
 	}
-	s.Graph, s.SrcDir, s.Repo, s.GithubRepo, s.Cleanup = nil, "", "", "", nil
+	s.Graph, s.Adapter, s.SrcDir, s.Repo, s.GithubRepo, s.Cleanup = nil, nil, "", "", "", nil
 	s.Usage, s.Health = core.UsageScan{}, nil
 	s.Profiles, s.IssueDrafts, s.IssueTargetRepo = nil, nil, ""
 }
 
 // OrchestratorAgent coordinates the multi-agent pipeline and user conversation.
 type OrchestratorAgent struct {
-	model        string
-	couplingAg   *CouplingAgent
-	vulnAg       *VulnerabilityAgent
-	maintAg      *MaintenanceAgent
-	remedAg      *RemediationAgent
-	actionAg     *ActionAgent
-	limiter      *ConcurrencyLimiter
-	sess         *Session
+	model      string
+	couplingAg *CouplingAgent
+	vulnAg     *VulnerabilityAgent
+	maintAg    *MaintenanceAgent
+	remedAg    *RemediationAgent
+	actionAg   *ActionAgent
+	limiter    *ConcurrencyLimiter
+	sess       *Session
 
 	errOut io.Writer // where user-facing errors are shown (stderr)
 	failed bool      // a tool reported a failure to the user this turn
@@ -159,12 +161,14 @@ func (o *OrchestratorAgent) AnalyzeRepository(repo, file, ref, dir string) strin
 	}
 
 	var data []byte
+	var lockName string
 	fetchErr := core.WithSpinner("Fetching lockfile", func() error {
 		var err error
 		if file != "" {
 			data, err = core.ReadLocalFile(file, "lockfile")
+			lockName = filepath.Base(file)
 		} else {
-			data, err = core.FetchFile(repo, ref, dir, "package-lock.json")
+			data, lockName, err = core.FetchLockfile(repo, ref, dir)
 		}
 		return err
 	})
@@ -174,25 +178,33 @@ func (o *OrchestratorAgent) AnalyzeRepository(repo, file, ref, dir string) strin
 	o.sess.Reset()
 
 	var g *core.Graph
+	var adapter core.EcosystemAdapter = core.NpmAdapter{}
 	buildErr := core.WithSpinner("Analyzing dependencies", func() error {
-		var lf core.Lockfile
-		if err := json.Unmarshal(data, &lf); err != nil {
-			src := "package-lock.json from " + repo
-			if file != "" {
-				src = file
-			}
-			return core.LockfileParseError(err, src)
-		}
-		if len(lf.Packages) == 0 && len(lf.V1Deps) > 0 {
-			pj, err := core.LoadPackageJSON(repo, ref, dir, file)
-			if err != nil {
-				return core.Annotate(err, "This is a version 1 lockfile, which does not list the project's direct dependencies, so Atlas also needs its package.json.")
-			}
-			core.ConvertV1(&lf, pj)
-		}
 		var err error
-		g, err = core.BuildGraph(&lf)
-		return err
+		switch core.DetectEcosystem(lockName) {
+		case core.EcosystemPoetry:
+			adapter = python.Adapter{}
+			g, err = python.BuildPoetryGraph(data, repo, ref, dir, file)
+			return err
+		default:
+			var lf core.Lockfile
+			if err := json.Unmarshal(data, &lf); err != nil {
+				src := "package-lock.json from " + repo
+				if file != "" {
+					src = file
+				}
+				return core.LockfileParseError(err, src)
+			}
+			if len(lf.Packages) == 0 && len(lf.V1Deps) > 0 {
+				pj, err := core.LoadPackageJSON(repo, ref, dir, file)
+				if err != nil {
+					return core.Annotate(err, "This is a version 1 lockfile, which does not list the project's direct dependencies, so Atlas also needs its package.json.")
+				}
+				core.ConvertV1(&lf, pj)
+			}
+			g, err = core.BuildGraph(&lf)
+			return err
+		}
 	})
 	if buildErr != nil {
 		return o.fail(buildErr)
@@ -201,6 +213,7 @@ func (o *OrchestratorAgent) AnalyzeRepository(repo, file, ref, dir string) strin
 	core.Detail("%d packages, %d edges, %d direct dependencies", len(g.Nodes), edges, direct)
 
 	o.sess.Graph = g
+	o.sess.Adapter = adapter
 	o.sess.GithubRepo = repo
 	if repo != "" {
 		o.sess.Repo = repo
@@ -285,6 +298,7 @@ func (o *OrchestratorAgent) RunParallelSpecialists() string {
 			candidates = append(candidates, RiskCandidate{
 				Package:          h.Package,
 				Version:          h.Version,
+				Ecosystem:        o.sess.Graph.Ecosystem,
 				Dev:              h.Dev,
 				Classification:   class,
 				BlastRadius:      blast,
@@ -423,7 +437,7 @@ func (o *OrchestratorAgent) ScanUsage(pkg string) string {
 	var text string
 	_ = core.WithSpinner("Scanning usage", func() error {
 		var result core.UsageScan
-		text, result = core.RunScan(o.sess.Graph, o.sess.SrcDir, pkg, false)
+		text, result = core.RunScan(o.sess.Graph, o.sess.SrcDir, pkg, false, o.sess.Adapter)
 		o.sess.Usage = result
 		return nil
 	})
@@ -437,8 +451,8 @@ func (o *OrchestratorAgent) CheckHealth(top int) string {
 		return "error: call analyze_repository first"
 	}
 	var rows []*core.Health
-	_ = core.WithSpinner("Checking dependency health (npm, GitHub, OSV.dev)", func() error {
-		rows = core.RunHealth(o.sess.Graph, top)
+	_ = core.WithSpinner(fmt.Sprintf("Checking dependency health (%s, GitHub, OSV.dev)", o.sess.Graph.Ecosystem.RegistryName()), func() error {
+		rows = core.RunHealth(o.sess.Graph, top, o.sess.Adapter)
 		return nil
 	})
 	o.sess.Health = rows
@@ -680,12 +694,12 @@ func (o *OrchestratorAgent) WriteSessionReport(reasoning string) (string, error)
 func (o *OrchestratorAgent) AgentTools() []core.OllamaTool {
 	return []core.OllamaTool{
 		core.NewTool("analyze_repository",
-			"Clone a GitHub repo (or read a local lockfile), parse its npm lockfile, build the dependency graph, compute blast-radius metrics, and dispatch parallel specialist agents for coupling, security, maintenance, and remediation. Call this first for any repository analysis request.",
+			"Clone a GitHub repo (or read a local lockfile), parse its lockfile (npm package-lock.json or Python poetry.lock), build the dependency graph, compute blast-radius metrics, and dispatch parallel specialist agents for coupling, security, maintenance, and remediation. Call this first for any repository analysis request.",
 			map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"repo": map[string]any{"type": "string", "description": "GitHub repo as owner/name, e.g. cloudflare/mcp"},
-					"file": map[string]any{"type": "string", "description": "path to a local package-lock.json"},
+					"file": map[string]any{"type": "string", "description": "path to a local lockfile (package-lock.json or poetry.lock)"},
 					"ref":  map[string]any{"type": "string", "description": "branch, tag, or commit SHA (optional)"},
 					"dir":  map[string]any{"type": "string", "description": "subdirectory for monorepos (optional)"},
 				},
@@ -843,8 +857,8 @@ const maxToolHops = 6
 // discovered by re-opening a silently-rewritten report.
 var analysisTools = map[string]bool{
 	"analyze_repository": true,
-	"scan_usage":          true,
-	"check_health":        true,
+	"scan_usage":         true,
+	"check_health":       true,
 }
 
 func (o *OrchestratorAgent) RunTurn(model string, history *[]core.OllamaMessage, tools []core.OllamaTool) error {
