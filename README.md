@@ -1,4 +1,4 @@
-﻿<img width="1280" height="640" alt="Atlas" src="https://github.com/user-attachments/assets/b8b96783-5833-4121-9b6d-f0b747dd3ba7" />
+<img width="1280" height="640" alt="Atlas" src="https://github.com/user-attachments/assets/b8b96783-5833-4121-9b6d-f0b747dd3ba7" />
 
 <div align="center">
 
@@ -6,7 +6,6 @@
 ### Dependency Mapper & Multi-Agent Risk Analyzer
 
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat-square&logo=go)](https://go.dev/)
-[![License](https://img.shields.io/badge/License-MIT-b7976a?style=flat-square)](LICENSE)
 [![Ollama](https://img.shields.io/badge/Powered%20by-Ollama-black?style=flat-square)](https://ollama.com)
 
 **Srijan Dahal · Parth Poudyal · Arun Mainali · Suprit Phuyal** · *Frogtober Fest 2026*
@@ -86,6 +85,18 @@ go run .
 
 - **One-shot CLI** — pass `-repo` or `-file` and Atlas runs the full pipeline and exits. Fast, deterministic, no LLM required.
 - **Interactive Agent** — run with no flags to get a conversational REPL. The agent orchestrates the pipeline via tool calls, produces an HTML report, and can file GitHub issues on your behalf.
+
+### Scope & Limitations
+
+| Feature / Consideration | One-Shot CLI (`-repo` / `-file`) | Interactive Agent (`go run .`) |
+|---|---|---|
+| **Ideal For** | Fast CI/terminal checks & quick graph/health audits | Deep architectural triage & automated remediation |
+| **Prerequisites** | Go only (zero LLM; token optional) | Ollama running (`gemma4:e4b`) + `GITHUB_TOKEN` |
+| **AI Specialists & Remediation** | ❌ Skipped (purely deterministic) | ✅ 4 parallel agents (Coupling, Vuln, Maintenance, Remediation) |
+| **Full HTML Audit Report** | ❌ (stdout terminal summary only) | ✅ Generated & automatically opened in browser |
+| **Interactive Graph (`graph.html`)** | Opt-in with `-viz graph.html` | ✅ Automatically created & opened in browser |
+| **GitHub Issue Filing** | ❌ Not available | ✅ Triages, deduplicates, and files issues upon confirmation |
+| **Local File Constraints (`-file`)** | Requires sibling manifest (`package.json` for v1, `pyproject.toml` for poetry); source scan defaults to lockfile folder (pass `-src` if separate) | Can analyze local lockfiles via chat prompt, but cannot file GitHub issues without an explicit remote repo |
 
 ## Key Flags
 
