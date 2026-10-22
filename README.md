@@ -72,7 +72,7 @@ OLLAMA_HOST=http://localhost:11434
 
 ```bash
 # One-shot: analyze a public repo (no Ollama needed)
-go run . -repo expressjs/express
+go run . -repo  cloudflare/mcp
 
 # One-shot: analyze a local lockfile
 go run . -file ./package-lock.json
