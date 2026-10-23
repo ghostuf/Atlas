@@ -51,8 +51,8 @@ graph TD
 | | |
 |---|---|
 | **Go 1.22+** | Build & run |
-| **Ollama** | Required for interactive mode only — `ollama pull gemma4:e4b` |
-| **GitHub Token** | Optional for one-shot mode; required for interactive mode |
+| **Ollama** | `ollama pull gemma4:e4b` |
+| **GitHub Token** | Required. Classic token, with `repo` scope if you want to open issues in private repositories |
 
 ## Setup
 
@@ -71,52 +71,49 @@ OLLAMA_HOST=http://localhost:11434
 ## Quick Start
 
 ```bash
-# One-shot: analyze a public repo (no Ollama needed)
-go run . -repo  cloudflare/mcp
-
-# One-shot: analyze a local lockfile
-go run . -file ./package-lock.json
-
-# Interactive AI agent (requires Ollama + GitHub token)
+# Interactive agent, no repo loaded yet
 go run .
+
+# Interactive agent, pre-loaded with a repo
+go run . -repo cloudflare/mcp
 ```
 
-## Two Modes
+## How to Run
 
-- **One-shot CLI** — pass `-repo` or `-file` and Atlas runs the full pipeline and exits. Fast, deterministic, no LLM required.
-- **Interactive Agent** — run with no flags to get a conversational REPL. The agent orchestrates the pipeline via tool calls, produces an HTML report, and can file GitHub issues on your behalf.
-
-### Scope & Limitations
-
-| Feature / Consideration | One-Shot CLI (`-repo` / `-file`) | Interactive Agent (`go run .`) |
-|---|---|---|
-| **Ideal For** | Fast CI/terminal checks & quick graph/health audits | Deep architectural triage & automated remediation |
-| **Prerequisites** | Go only (zero LLM; token optional) | Ollama running (`gemma4:e4b`) + `GITHUB_TOKEN` |
-| **AI Specialists & Remediation** | ❌ Skipped (purely deterministic) | ✅ 4 parallel agents (Coupling, Vuln, Maintenance, Remediation) |
-| **Full HTML Audit Report** | ❌ (stdout terminal summary only) | ✅ Generated & automatically opened in browser |
-| **Interactive Graph (`graph.html`)** | Opt-in with `-viz graph.html` | ✅ Automatically created & opened in browser |
-| **GitHub Issue Filing** | ❌ Not available | ✅ Triages, deduplicates, and files issues upon confirmation |
-| **Local File Constraints (`-file`)** | Requires sibling manifest (`package.json` for v1, `pyproject.toml` for poetry); source scan defaults to lockfile folder (pass `-src` if separate) | Can analyze local lockfiles via chat prompt, but cannot file GitHub issues without an explicit remote repo |
+Atlas is a conversational REPL. Run it with no flags and tell it what to analyze, or pass `-repo` to pre-load a repo as your first message. The agent orchestrates the pipeline via tool calls, produces an HTML report, and can file GitHub issues on your behalf.
 
 ## Key Flags
 
 | Flag | Description |
 |---|---|
-| `-repo owner/name` | GitHub repo to analyze |
-| `-file ./lockfile` | Local `package-lock.json` or `poetry.lock` |
+| `-repo owner/name` | GitHub repo to analyze; pre-loads it as the first message |
 | `-ref branch/sha` | Git ref (default: repo default branch) |
 | `-dir subpath` | Subdirectory for monorepos |
-| `-viz graph.html` | Write interactive HTML dependency graph |
-| `-health=false` | Skip health checks for a fast graph-only run |
-| `-health-top N` | Also health-check top N transitive deps |
-| `-show pkg` | Print usage snippets for a specific package |
 | `-model name` | Ollama model (default: `gemma4:e4b`) |
+
+## Debug
+
+Bypasses the agent entirely and runs the deterministic pipeline once, printing straight to the terminal. Useful for local debugging, **not the intended way to use Atlas**.
+
+| Flag | Description |
+|---|---|
+| `-file ./lockfile` | Local `package-lock.json` or `poetry.lock`; triggers this mode |
+| `-top N` | Rows to print (default: 25) |
+| `-src dir` | Local source dir to scan for usage (default: dir of `-file`) |
+| `-show pkg` | Print sampled usage snippets for a package |
+| `-viz path` | Write an interactive HTML graph, e.g. `graph.html` |
+| `-viz-max N` | Max nodes in the visualization (default: 150) |
+| `-health=false` | Skip dependency health checks |
+| `-health-top N` | Also health-check this many extra packages by blast radius |
+| `-health-json path` | Write the health report as JSON |
+| `-cpuprofile path` / `-memprofile path` / `-trace path` | Go profiling output |
 
 ## Outputs
 
-- **Terminal** — ranked blast-radius table + health summary per package
-- **`graph.html`** — interactive D3 force-directed visualization (node size = blast radius)
-- **`reports/report.html`** — full HTML report with multi-agent risk profiles, opened automatically in browser
+- **Terminal**: ranked blast-radius table + health summary per package
+- **`graph.html`**: interactive D3 force-directed visualization (node size = blast radius)
+- **`reports/report.html`**: full HTML report with multi-agent risk profiles, opened automatically in browser
+- **GitHub issues**: Atlas can open issues directly on the analyzed repository, if your `GITHUB_TOKEN` has write access to it
 
 ## Ecosystem Support
 
@@ -125,7 +122,11 @@ go run .
 | npm | `package-lock.json` (v1/v2/v3) |
 | Python/Poetry | `poetry.lock` |
 
-Detection is automatic. Adding a new package manager requires only implementing the `EcosystemAdapter` interface — zero changes to core.
+Detection is automatic. Adding a new package manager requires only implementing the `EcosystemAdapter` interface, with zero changes to core.
+
+## AI Usage Disclosure
+
+The Ollama model's output is not only displayed as chat text, it is also consumed programmatically. In `agents/remediation.go`, `RemediationAgent.Analyze` sends the model a JSON schema and `json.Unmarshal`s its response directly into a `RemediationPlan` struct. That struct is then read by `agents/action.go`'s `renderRemediation` and `CollectRisks` to build the title and body of GitHub issues, which `ActionAgent.CreateIssuesConcurrently` files on the analyzed repository. The same schema-constrained-output pattern is used by `CouplingAgent.Analyze` (`agents/coupling.go`), `VulnerabilityAgent.Analyze` (`agents/vulnerability.go`), and `MaintenanceAgent.Analyze` (`agents/maintenance.go`). If the model call fails or returns invalid JSON, each function falls back to a deterministic heuristic in the same block, never passing raw model text through as structured data.
 
 ---
 

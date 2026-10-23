@@ -796,12 +796,15 @@ func promptGithubToken() {
 	}
 }
 
-// RunAgentMode starts the interactive REPL with the orchestrator.
+// RunAgentMode starts the interactive REPL with the orchestrator. If repo is
+// non-empty (e.g. from `-repo owner/name` on the command line), it is
+// analyzed immediately, as if the user had typed "run dependency analysis on
+// <repo>" as their first message, before the REPL takes over.
 //
 // Startup validation order is documented on core.Preflight: configuration,
 // then GitHub, then Ollama. All independent failures are shown together and
 // the REPL does not start if any is blocking.
-func RunAgentMode(model string) {
+func RunAgentMode(model, repo, ref, dir string) {
 	promptGithubToken()
 
 	pre := core.Preflight(core.PreflightOptions{
@@ -826,6 +829,21 @@ func RunAgentMode(model string) {
 
 	history := []core.OllamaMessage{{Role: "system", Content: systemPrompt}}
 	tools := orch.AgentTools()
+
+	if repo != "" {
+		seed := "Run dependency analysis on " + repo
+		if ref != "" {
+			seed += " (ref: " + ref + ")"
+		}
+		if dir != "" {
+			seed += " (dir: " + dir + ")"
+		}
+		fmt.Println("\nyou> " + seed)
+		history = append(history, core.OllamaMessage{Role: "user", Content: seed})
+		if err := orch.RunTurn(model, &history, tools); err != nil {
+			fmt.Fprintln(os.Stderr, core.FormatError(err))
+		}
+	}
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
