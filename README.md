@@ -124,6 +124,10 @@ Bypasses the agent entirely and runs the deterministic pipeline once, printing s
 
 Detection is automatic. Adding a new package manager requires only implementing the `EcosystemAdapter` interface, with zero changes to core.
 
+## AI Usage Disclosure
+
+The Ollama model's output is not only displayed as chat text, it is also consumed programmatically. In `agents/remediation.go`, `RemediationAgent.Analyze` sends the model a JSON schema and `json.Unmarshal`s its response directly into a `RemediationPlan` struct. That struct is then read by `agents/action.go`'s `renderRemediation` and `CollectRisks` to build the title and body of GitHub issues, which `ActionAgent.CreateIssuesConcurrently` files on the analyzed repository. The same schema-constrained-output pattern is used by `CouplingAgent.Analyze` (`agents/coupling.go`), `VulnerabilityAgent.Analyze` (`agents/vulnerability.go`), and `MaintenanceAgent.Analyze` (`agents/maintenance.go`). If the model call fails or returns invalid JSON, each function falls back to a deterministic heuristic in the same block, never passing raw model text through as structured data.
+
 ---
 
 <div align="center">
