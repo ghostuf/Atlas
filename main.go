@@ -3,12 +3,11 @@
 //
 // Usage:
 //
-//	go run . -repo expressjs/express            # fetches package-lock.json from default branch
 //	go run . -repo owner/repo -ref main -dir packages/app
-//	go run . -file ./package-lock.json          # local npm lockfile
-//	go run . -file ./poetry.lock                # local poetry lockfile (needs sibling pyproject.toml)
-//	go run . -repo owner/repo -top 30
-//	go run .                                    # launches multi-agent interactive REPL
+//	go run . -file ./package-lock.json          # one-shot: local npm lockfile
+//	go run . -file ./poetry.lock                # one-shot: local poetry lockfile (needs sibling pyproject.toml)
+//	go run . -file ./package-lock.json -top 30
+//	go run .                                    # launches the interactive agent
 package main
 
 import (
@@ -46,8 +45,8 @@ func main() {
 	traceOut := flag.String("trace", "", "write an execution trace to this file (non-agent mode only)")
 	flag.Parse()
 
-	if *repo == "" && *file == "" {
-		agents.RunAgentMode(*model)
+	if *file == "" {
+		agents.RunAgentMode(*model, *repo, *ref, *dir)
 		return
 	}
 
@@ -103,16 +102,8 @@ func main() {
 		}()
 	}
 
-	var data []byte
-	var lockName string
-	var err error
-	switch {
-	case *file != "":
-		data, err = core.ReadLocalFile(*file, "lockfile")
-		lockName = filepath.Base(*file)
-	case *repo != "":
-		data, lockName, err = core.FetchLockfile(*repo, *ref, *dir)
-	}
+	data, err := core.ReadLocalFile(*file, "lockfile")
+	lockName := filepath.Base(*file)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, core.FormatError(err))
 		os.Exit(1)
