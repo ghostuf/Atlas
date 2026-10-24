@@ -18,6 +18,7 @@ Atlas answers the question `npm audit` never could: *how deeply is my codebase w
 
 It maps blast radius, maintainer health, and vulnerability reachability across your full dependency graph, then dispatches a team of parallel AI agents to produce concrete, prioritized remediation plans.
 
+Demo Video: <a href="https://youtu.be/Sz50TpRbgHI">Atlas Demo Video - FrogtoberFest 2026 </a>
 ## Use Cases
 
 **Nepal:** Government websites here leak data on a near-routine basis. We believe this is largely a result of bad engineering, not sophisticated attacks: unaudited dependencies and unoptimized codebases shipped without anyone checking what's actually in the dependency tree or whether it's being used safely. Atlas is built to catch exactly that, before it becomes the next breach.
