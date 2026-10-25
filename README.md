@@ -8,6 +8,9 @@
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat-square&logo=go)](https://go.dev/)
 [![Ollama](https://img.shields.io/badge/Powered%20by-Ollama-black?style=flat-square)](https://ollama.com)
 
+#### Included In 
+[![xerj-org/xerj](https://img.shields.io/badge/%20-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/xerj-org/xerj)[![Xerj Hub Corpus](https://img.shields.io/badge/Xerj%20Hub-Corpus%3A%20ghostuf%2Fatlas-teal?style=flat-square)](https://hub.xerj.org/corpus/ghostuf--atlas)
+
 **Srijan Dahal · Parth Poudyal · Arun Mainali · Suprit Phuyal** · *Frogtober Fest 2026*
 
 </div>
