@@ -136,11 +136,24 @@ Detection is automatic. Adding a new package manager requires only implementing 
 
 ## AI Usage Disclosure
 
-The Ollama model's output is not only displayed as chat text, it is also consumed programmatically. In `agents/remediation.go`, `RemediationAgent.Analyze` sends the model a JSON schema and `json.Unmarshal`s its response directly into a `RemediationPlan` struct. That struct is then read by `agents/action.go`'s `renderRemediation` and `CollectRisks` to build the title and body of GitHub issues, which `ActionAgent.CreateIssuesConcurrently` files on the analyzed repository. The same schema-constrained-output pattern is used by `CouplingAgent.Analyze` (`agents/coupling.go`), `VulnerabilityAgent.Analyze` (`agents/vulnerability.go`), and `MaintenanceAgent.Analyze` (`agents/maintenance.go`). If the model call fails or returns invalid JSON, each function falls back to a deterministic heuristic in the same block, never passing raw model text through as structured data.
+Atlas uses a locally-hosted Ollama model whose output is consumed programmatically; deserialized into Go structs that drive reports and GitHub issue creation. Every AI-consuming function includes a deterministic fallback; raw model text is never passed through as structured data. For a full, file-by-file breakdown of every programmatic consumption point, see [AIUSAGE.md](AIUSAGE.md).
+
+## Limitations / Future Improvements
+
+Atlas is under active development. The current limitations are areas where open-source contributors can make the most impact:
+
+| Limitation | Detail | Opportunity |
+|---|---|---|
+| **Ecosystem coverage** | Backend support is currently limited to **npm** (`package-lock.json` v1/v2/v3) and **Python/Poetry** (`poetry.lock`). Other major ecosystems: Cargo (Rust), Go Modules, Composer (PHP), Maven/Gradle (Java), Bundler (Ruby), uv/Pipenv (Python), are not yet supported. | Adding a new ecosystem requires only implementing the `EcosystemAdapter` interface with zero changes to core logic. See the [Ecosystem Adapters](CONTRIBUTING.md#a-ecosystem-adapters-coreadaptergo-coreecosystemgo-corelang) section of CONTRIBUTING.md for a step-by-step guide. |
+| **Agent coverage** | No specialist agents yet exist for license compliance, supply-chain/typosquatting detection, or dependency bloat analysis. | New agents plug into the existing parallel dispatch pipeline. Contribution ideas and architectural guidance are detailed in the [Multi-Agent Reasoning](CONTRIBUTING.md#b-multi-agent-reasoning--specialists-agents) section of CONTRIBUTING.md. |
+| **Output formats** | Atlas currently outputs terminal tables, an interactive HTML graph, and a self-contained HTML report. Standards like SARIF, CycloneDX/SPDX SBOM, and structured JSON are not yet supported. | Export format work is scoped in the [CLI & Developer Experience](CONTRIBUTING.md#e-cli-repl--developer-experience-maingo-agentsorchestratorgo) section of CONTRIBUTING.md. |
+| **CI/CD integration** | There is no first-party GitHub Actions workflow or CI pipeline integration. | Community-contributing workflows would enable Atlas to enforce dependency health budgets on every pull request. |
+
+We view each limitation as an invitation. Atlas is designed with modular seams specifically so that contributors can work independently on isolated layers. If any of the above interests you, check out [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines, architecture seams, and our pull request schematics.
 
 ## Contributing
 
-We welcome open-source contributions! Whether you want to add new ecosystem adapters (Cargo, Go modules, Composer), build new specialist agents, or enhance the interactive visualizer, please check out [CONTRIBUTE.md](CONTRIBUTE.md) for detailed guidelines, architecture seams, and our pull request schematics.
+We welcome open-source contributions! Whether you want to add new ecosystem adapters (Cargo, Go modules, Composer), build new specialist agents, or enhance the interactive visualizer, please check out [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines, architecture seams, and our pull request schematics.
 
 ---
 
